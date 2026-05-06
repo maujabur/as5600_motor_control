@@ -96,8 +96,8 @@ AxisConfig y_axis_config = {
 ### **Transmissor (Joystick):**
 ```
 Joystick → ESP32-C3
-+5V      → 3.3V
 GND      → GND  
++5V      → 3.3V
 VRX      → GPIO 3
 VRY      → GPIO 4
 SW       → GPIO 2

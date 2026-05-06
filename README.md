@@ -61,8 +61,8 @@ uint8_t receiverMAC[] = {0x24, 0x6F, 0x28, 0xAA, 0xBB, 0xCC};
 ### 2. Conectar o joystick no transmissor (pinos otimizados)
 ```
 Joystick    ESP32-C3
-+5V     ->  5V
 GND     ->  GND
++5V     ->  3.3V
 VRX     ->  GPIO 4 (eixo X)
 VRY     ->  GPIO 3 (eixo Y)  
 SW      ->  GPIO 2 (botão)
