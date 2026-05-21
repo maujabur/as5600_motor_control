@@ -381,8 +381,9 @@ void updatePositionMoveControl() {
     const float desl_signed = g_move_start_accumulated_captured
                                 ? (g_position_servo.accumulatedDeg() - g_move_start_accumulated_deg)
                                 : g_move_total_net_delta_deg;
-    Serial.printf("OK: alvo atingido em %.2f deg (ang_ini=%.2f deg, desl=%.2f deg, tempo=%u ms, rpm_pico=%.2f, rpm_medio=%.2f, pwm_pid_pico=%.1f%%, pwm_out_pico=%.1f%%, pwm_out_med=%.1f%%, pwm_sat=%.0f%%)\n",
-                  current_deg, ang_ini, desl_signed, elapsed_ms, g_move_peak_rpm_signed, rpm_medio,
+    const float desl_abs = fabsf(desl_signed);
+    Serial.printf("OK: alvo atingido em %.2f deg (ang_ini=%.2f deg, desl=%.2f deg, desl_abs=%.2f deg, tempo=%u ms, rpm_pico=%.2f, rpm_medio=%.2f, pwm_pid_pico=%.1f%%, pwm_out_pico=%.1f%%, pwm_out_med=%.1f%%, pwm_sat=%.0f%%)\n",
+                  current_deg, ang_ini, desl_signed, desl_abs, elapsed_ms, g_move_peak_rpm_signed, rpm_medio,
                   pwm_pid_pico_pct, pwm_out_pico_pct, pwm_out_medio_pct, pwm_out_sat_pct);
   }
 }
@@ -865,7 +866,14 @@ void parseAndHandleCommand(char* line) {
     consumeToken(extra2);
     vmax_rpm = clampf(vmax_rpm, 0.0f, s.max_target_rpm);
 
+    float current_deg = 0.0f;
+    if (!g_as5600.readAngleDeg(&current_deg)) {
+      printErrorAndPrompt("ERRO: falha ao ler AS5600");
+      return;
+    }
+
     g_position_servo.startMove(target_deg, vmax_rpm, direction);
+    g_position_servo.primeAccumulatedAngle(current_deg);
     g_move_done_reported = false;
     g_move_start_ms = millis();
     const char* direction_text =
@@ -913,6 +921,7 @@ void parseAndHandleCommand(char* line) {
                         : CascadePositionController::MoveDirection::CounterClockwise;
 
     g_position_servo.startMove(target_accumulated_deg, vmax_rpm, direction);
+    g_position_servo.primeAccumulatedAngle(current_deg);
     g_move_done_reported = false;
     g_move_start_ms = millis();
 
@@ -960,6 +969,7 @@ void parseAndHandleCommand(char* line) {
                         : CascadePositionController::MoveDirection::Clockwise;
 
     g_position_servo.startMove(target_accumulated_deg, vmax_rpm, direction);
+    g_position_servo.primeAccumulatedAngle(current_deg);
     g_move_done_reported = false;
     g_move_start_ms = millis();
 

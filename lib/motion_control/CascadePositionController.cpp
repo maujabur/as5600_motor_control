@@ -55,6 +55,12 @@ void CascadePositionController::cancel() {
   last_current_deg_normalized_ = 0.0f;
 }
 
+void CascadePositionController::primeAccumulatedAngle(float current_deg) {
+  current_accumulated_deg_ = current_deg;
+  last_current_deg_normalized_ = normalize360(current_deg);
+  accumulated_angle_initialized_ = true;
+}
+
 float CascadePositionController::computeOutputPercent(float current_deg, uint32_t now_ms) {
   if (!active_) return 0.0f;
 

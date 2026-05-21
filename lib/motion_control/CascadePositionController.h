@@ -56,6 +56,7 @@ class CascadePositionController {
   float lastVelocityError() const { return last_error_rpm_; }
   int pwmOutput() const { return last_pwm_output_; }
   float accumulatedDeg() const { return current_accumulated_deg_; }
+  void primeAccumulatedAngle(float current_deg);
 
   // Computa saída PWM com cascata PID
   float computeOutputPercent(float current_deg, uint32_t now_ms);
