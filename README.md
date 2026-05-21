@@ -1,279 +1,339 @@
-# ESP32-S2 Joystick ESP-NOW Controller
+# Motor PWM Tester (Serial) - ESP32-C3 Super Mini
 
-Sistema de controle remoto usando ESP32-S2 Mini e ESP-NOW, disponível em duas versões para diferentes níveis de complexidade.
+Projeto de bancada para testar motores DC com ponte H L298N via comandos seriais.
 
-## 📁 **Estrutura do Projeto:**
+Estado atual do firmware:
+- Sem Wi-Fi
+- Sem ESP-NOW
+- Controle por porcentagem de PWM
+- Controle de posicao tipo servo com AS5600 (malha fechada)
+- Reversao de direcao
+- Rampas de aceleracao e desaceleracao ajustaveis
+- Dead band configuravel (tstart / tstop)
+- Kick de partida e inversao configuravel
+- Freio eletrico (curto-circuito regenerativo via L298N)
+- Maquina de estados: IDLE / KICK / RUNNING / BRAKE
+- Selecao do canal do motor (default em IN3/IN4)
 
-### PlatformIO
-- **`src/main.cpp`**: Código unificado (TX/RX) para PlatformIO
+Arquivo principal do firmware:
+- src/main.cpp
 
-### Arduino IDE - Duas Versões Disponíveis
-- **`arduino_versions/`**: Códigos separados para Arduino IDE
-  
-  #### 📁 **Sistema Básico** (para iniciantes)
-  - **`transmit/transmit.ino`**: Transmissor básico (1 joystick)
-  - **`receive/receive.ino`**: Receptor básico (controle de motores)
-  
-  #### 🚀 **Sistema Expandido** (para projetos avançados)
-  - **`expanded_transmit/expanded_transmit.ino`**: Transmissor expandido (múltiplos sensores)
-  - **`expanded_receive/expanded_receive.ino`**: Receptor expandido (controles auxiliares)
+Modulos reaproveitaveis:
+- lib/motion_control/As5600Sensor.h
+- lib/motion_control/As5600Sensor.cpp
+- lib/motion_control/PositionServoController.h
+- lib/motion_control/PositionServoController.cpp
 
-### Documentação
-- **[README Arduino IDE](arduino_versions/README.md)**: Visão geral e escolha de versão
-- **[README Sistema Básico](arduino_versions/README_BASICO.md)**: Guia completo do sistema básico  
-- **[README Sistema Expandido](arduino_versions/README_EXPANSION.md)**: Guia do sistema expandido
+## Objetivo
 
-## 🎯 Qual Versão Escolher?
+Permitir testes rapidos e repetiveis de motor, com foco em:
+- Ajuste fino de PWM em porcentagem
+- Mudanca de sentido (frente/re)
+- Ajuste de resposta dinamica (rampas e curva)
+- Dead band remapeado para evitar zona morta sem movimento
+- Kick de partida para vencer inercial e atrito estatico
+- Freio eletrico configuravel (duracao ajustavel)
+- Escolha de qual canal da L298N sera comandado
 
-### Sistema Básico - Para Iniciantes
-✅ **Use se:**
-- É seu primeiro projeto ESP32
-- Quer algo simples e funcional
-- Tem apenas 1 joystick
-- Precisa apenas de controle de motores
+## Hardware alvo
 
-### Sistema Expandido - Para Projetos Avançados  
-🚀 **Use se:**
-- Quer funcionalidades avançadas (turbo, parada emergência)
-- Tem múltiplos sensores (2º joystick, potenciômetro, sensor luz)
-- Precisa de controles auxiliares (servo, buzzer, LEDs, relé)
-- Está construindo um robô complexo
+- Placa: ESP32-C3 Super Mini (padrao do projeto)
+- Driver: L298N
+- Motores: DC escovados (1 ou 2 para teste)
 
----
+## Mapeamento de pinos
 
-## 🔄 Comparação Rápida
+No firmware atual:
+- GPIO 1 -> IN1 (motor A)
+- GPIO 2 -> IN2 (motor A)
+- GPIO 3 -> IN3 (motor B)
+- GPIO 4 -> IN4 (motor B)
+- GPIO 5 -> I2C SDA (AS5600)
+- GPIO 6 -> I2C SCL (AS5600)
 
-| Funcionalidade | Sistema Básico | Sistema Expandido |
-|---|:---:|:---:|
-| **Joysticks** | 1 | 2 |
-| **Controle velocidade** | ❌ | ✅ Potenciômetro |
-| **Modo turbo** | ❌ | ✅ +50% velocidade |
-| **Parada emergência** | ❌ | ✅ Botão joystick |
-| **Controles auxiliares** | ❌ | ✅ Servo, buzzer, LEDs |
-| **Luzes automáticas** | ❌ | ✅ Sensor de luz |
-| **Tempo de montagem** | ~30 min | ~2 horas |
-| **Ideal para** | Aprendizado | Robô completo |
+Canal padrao ao iniciar:
+- IN3/IN4 (motor B)
 
-📖 **Para instruções detalhadas, consulte os READMEs específicos acima!**
+## Ligacao recomendada (L298N)
 
----
+Controle:
+- ESP32 GPIO1 -> IN1
+- ESP32 GPIO2 -> IN2
+- ESP32 GPIO3 -> IN3
+- ESP32 GPIO4 -> IN4
 
-## Pinos ESP32-S2 Mini (estado atual)
+No modulo L298N:
+- ENA e ENB podem ficar jumpeados para este modo de teste
+- O PWM e aplicado diretamente nos pinos INx
 
-### Transmissor (Joystick):
-- **GPIO 7**: Eixo X do joystick (analógico)
-- **GPIO 9**: Eixo Y do joystick (analógico)
-- **GPIO 5**: Botão do joystick
-- **GPIO 15**: LED de status
+Alimentacao:
+- Fonte dos motores no borne de potencia da L298N
+- GND comum entre ESP32 e L298N
+- Nao alimente o ESP32 com sobretensao
 
-Observação de montagem do módulo joystick:
-- Se o joystick for montado com os pinos de conexão "para baixo", conecte de forma cruzada:
-  - **VRX -> eixo Y**
-  - **VRY -> eixo X**
+## Build e upload (PlatformIO)
 
-### Receptor (Motores):
-- **GPIO 11**: IN1 motor direito
-- **GPIO 9**: IN2 motor direito
-- **GPIO 7**: IN3 motor esquerdo
-- **GPIO 5**: IN4 motor esquerdo
-- **GPIO 15**: LED de status
+Ambiente padrao no projeto:
+- esp32c3_supermini
 
-### Situação de Placa:
-- **Principal**: ESP32-S2 Mini (melhor custo e antena mais confiável no lote atual)
-- **ESP32-C3 Super Mini**: mantida como opção, mas não é a placa principal neste momento
-```
-Joystick    ESP32-S2
-+5V     ->  3.3V
-GND     ->  GND
-VRX     ->  GPIO 7 (ou GPIO 9 se montado cruzado)
-VRY     ->  GPIO 9 (ou GPIO 7 se montado cruzado)
-SW      ->  GPIO 5
+Comandos uteis:
+
+```bash
+pio run -e esp32c3_supermini
+pio run -e esp32c3_supermini -t upload
+pio device monitor -b 115200
 ```
 
-## Como usar
+Tambem funciona no VS Code com "Upload" e "Monitor" do PlatformIO.
 
-### Para PlatformIO (src/main.cpp)
+## Interface serial
 
-### 1. Descobrir MAC Address para pareamento
-**NOVO**: O MAC address agora é exibido automaticamente na inicialização!
+Baud rate:
+- 115200
 
-#### Para Receptor:
-- Configure `MODE RX_MODE` no código
-- Faça upload no ESP32 receptor
-- Abra o Serial Monitor
-- Copie o MAC exibido no formato:
-```
-*** CONFIGURAÇÃO DE PAREAMENTO ***
-MAC Address deste RECEPTOR:
-24:6F:28:AA:BB:CC
+Ao iniciar, o firmware imprime ajuda e status, e depois mostra um prompt `>` quando esta pronto para receber comando.
 
-Configure este MAC no TRANSMISSOR:
-uint8_t receiverMAC[] = {0x24, 0x6F, 0x28, 0xAA, 0xBB, 0xCC};
-*********************************
-```
+Tambem sao aceitos comandos compactos de letra unica sem espaco antes do primeiro argumento, sem perder suporte aos comandos por extenso. Exemplos:
+- `p35`
+- `v-40`
+- `a250`
+- `z80`
+- `l60`
+- `k100`
+- `df`
+- `eoff`
+- `ma`
+- `mb`
+- `mm`
+- `ts20`
+- `kp90`
+- `bm300`
 
-#### Para Transmissor:
-- Configure `MODE TX_MODE` no código
-- Cole o MAC do receptor na linha `receiverMAC[]`
-- Faça upload no ESP32 transmissor
+Comandos por extenso continuam validos, por exemplo:
+- `help`
+- `status`
+- `motor in3`
+- `echo off`
+- `motora`
+- `motorb`
+- `motorboth`
 
-### Para Arduino IDE (Versões Separadas)
+### Comandos disponiveis
 
-#### Sistema Básico
-📖 **Consulte**: [README Sistema Básico](arduino_versions/README_BASICO.md)
-- Instruções passo-a-passo completas
-- Configuração de hardware e software
-- Pinout detalhado e conexões
+Ajuda e estado:
 
-#### Sistema Expandido  
-📖 **Consulte**: [README Sistema Expandido](arduino_versions/README_EXPANSION.md)
-- Múltiplos sensores e controles
-- Funcionalidades avançadas
-- Casos de uso e exemplos práticos
+- help | h | ?
+  - Mostra lista de comandos
 
----
+- status | s
+  - Mostra estado interno atual
 
-### 2. Conectar o joystick no transmissor (pinos otimizados)
-```
-Joystick    ESP32-S2
-GND     ->  GND
-+5V     ->  3.3V
-VRX     ->  GPIO 7 (eixo X)
-VRY     ->  GPIO 9 (eixo Y)
-SW      ->  GPIO 5 (botão)
-```
+Controle:
 
-### 3. Conectar a ponte H L298N no receptor
+- pwm | p <0..100>
+  - Define PWM percentual usando a direcao atual
+  - Exemplo: pwm 35
+  - Forma compacta: p35
 
-#### Conexões de Controle (ESP32 → L298N)
-```
-ESP32-S2 → L298N
-Pino 11  → IN1 (PWM+Direção motor direito)
-Pino 9   → IN2 (PWM+Direção motor direito)
-Pino 7   → IN3 (PWM+Direção motor esquerdo)
-Pino 5   → IN4 (PWM+Direção motor esquerdo)
+- set | v <-100..100>
+  - Define velocidade assinada diretamente
+  - Exemplo: set -50
+  - Forma compacta: v-50
 
-IMPORTANTE: ENA e ENB devem estar jumpeados (sempre HIGH)
-```
+- stop | x
+  - Corta a saida imediatamente (IDLE instantaneo, sem rampa)
 
-#### Alimentação através do Regulador L298N
-```
-Borne de parafuso do L298N:
-+12V → Duas baterias lipo em série (7.4V-8.4V)
-GND  → GND geral do circuito
-+5V  → Alimentação +5V do ESP32
+- brake | b
+  - Freio eletrico imediato: aplica IN1=IN2=HIGH no L298N por brakems
+  - Cria curto-circuito na bobina (freio regenerativo)
+  - Depois do tempo, vai para IDLE
 
-⚠️ CRÍTICO: NÃO ligue as duas baterias direto ao ESP32!
-         Isto pode danificá-lo permanentemente.
-         
-✅ USE: O regulador de tensão interno do L298N
-        (borne +5V → ESP32)
-```
+- rev | r
+  - Inverte direcao atual e reaplica target
 
-**Jumper do Regulador:**  
-Mantenha o jumper próximo ao borne **SEMPRE LIGADO** para ativar o regulador de 5V.
+- dir | d f|r
+  - Define direcao manual
+  - Exemplo: dir f
+  - Forma compacta: df
 
-**Documentação:**
-- **L298N**: Consulte o datasheet do módulo L298N para especificações completas e diagramas de pinout
-- **ESP32-S2 Mini**: Para detalhes sobre alimentação e especificações técnicas, consulte o manual do módulo ESP32-S2 Mini
+Canal do motor:
 
-### 4. Faça upload nos dispositivos
+- motor | m in3|in1|both
+  - Seleciona qual canal comandar
+  - in3 = IN3/IN4 (default)
+  - in1 = IN1/IN2
+  - both = ambos canais
 
-## Status LEDs
-- **3 piscadas**: Inicialização OK
-- **LED fixo**: Erro na inicialização
-- **Piscadas durante operação**: Dados sendo enviados
+- ma | motora
+  - Seleciona diretamente o motor A (IN1/IN2)
 
-## Dados enviados/recebidos
-- **joystick_x**: 0-4095 (eixo X)
-- **joystick_y**: 0-4095 (eixo Y)
-- **button_pressed**: true/false
-- **timestamp**: millis() para debugging
+- mb | motorb
+  - Seleciona diretamente o motor B (IN3/IN4)
 
-## ⚙️ **Configurações Importantes**
+- mm | motorboth
+  - Seleciona ambos os motores
 
-### **Limitação de Potência (Proteção de Motores)**
-No código (`main.cpp`), você pode ajustar a potência máxima:
-```cpp
-#define FATOR_DE_POTENCIA 0.75  // 75% da potência máxima
-```
+Rampas e limite:
 
-**⚠️ CRÍTICO para Motores 5V + Baterias Lítio:**
-Se você usa **motores de 5V** com **2 baterias de lítio** (7.4V-8.4V), **SEMPRE** limite a potência para evitar superaquecimento:
+- accel | a <ms>
+  - Tempo de aceleracao
+  - Default: 250ms
+  - Exemplo: accel 250
+  - Forma compacta: a250
 
-```cpp
-#define FATOR_DE_POTENCIA 0.6   // Motor 5V protegido com 2S lítio
-```
+- decel | z <ms>
+  - Tempo de desaceleracao
+  - Default: 80ms
+  - Exemplo: decel 80
+  - Forma compacta: z80
 
-**Explicação:**
-- Baterias lítio carregadas: 4.2V × 2 = **8.4V**  
-- Motor nominal: **5V**
-- Sem limitação: **168% da tensão nominal** = Motor queima! 🔥
-- Com 60%: 8.4V × 0.6 = **5.0V** = Seguro! ✅
+- curve | c <accel> <decel>
+  - Ajusta a curva (gamma) da rampa
+  - Default: 1.25 / 1.0
+  - Exemplo: curve 1.2 1.0
 
-**💡 Dica de Alimentação:**  
-Use o regulador interno do L298N para alimentar o ESP32. Conecte o borne +5V do L298N ao +5V do ESP32, evitando danos por sobretensão.
+- limit | l <0..100>
+  - Limite global de potencia
+  - Default: 100%
+  - Exemplo: limit 60
+  - Forma compacta: l60
 
-## Monitor do Receptor
-O receptor exibe dados detalhados e comandos de motor no Serial Monitor:
-```
-[42] Recebido de 24:6F:28:AA:BB:CC:
-  RAW    -> X:3072 Y:1024 BTN:FREE
-  MAPPED -> X: 255 Y:-128 BTN:FREE REGION:DOWN_RIGHT
-  MOTORS -> L:-237 R:   0 EN:YES SPEED:237
+Dead band / kick / freio:
 
-[STATUS] Pacotes: 42 | Último: 125 ms | Config X(c:2266 dz:200) Y(c:2221 dz:200)
-[TIMEOUT] Sem dados há mais de 1 segundo - PARANDO MOTORES
-```
+- tstart | ts <0..50>
+  - PWM minimo (%) que o motor precisa para comecar a girar
+  - O firmware remapeia internamente: qualquer valor >= tstop e enviado no minimo como tstart
+  - Default: 20%
+  - Forma compacta: ts20
 
-## Tank Drive - Mapeamento de Regiões
-- **CENTER**: Motores parados
-- **UP**: Ambos motores frente (movimento reto frente)
-- **DOWN**: Ambos motores trás (movimento reto trás)
-- **LEFT**: Esquerdo trás + Direito frente (giro no lugar esquerda)
-- **RIGHT**: Esquerdo frente + Direito trás (giro no lugar direita)
-- **UP_LEFT**: Só direito frente (curva suave esquerda)
-- **UP_RIGHT**: Só esquerdo frente (curva suave direita)
-- **DOWN_LEFT**: Só direito trás (curva suave esquerda em ré)
-- **DOWN_RIGHT**: Só esquerdo trás (curva suave direita em ré)
+- tstop | tp <0..50>
+  - Limiar abaixo do qual o motor e considerado parado
+  - Abaixo deste valor a saida PWM vai para 0
+  - Deve ser menor que tstart
+  - Default: 8%
 
-**Proporcionalidade**: Velocidade PWM aplicada diretamente nos pinos IN1-IN4:
-- **Motor parado**: IN1=0, IN2=0
-- **Motor frente**: IN1=PWM(0-255), IN2=0
-- **Motor trás**: IN1=0, IN2=PWM(0-255)
+- kick | k <ms>
+  - Duracao do pulso de partida / inversao em milissegundos
+  - Enviado sempre que o motor sai do IDLE
+  - k0 desabilita o kick
+  - Default: 100ms
+  - Forma compacta: k100
 
-## Hardware L298N
-- **ENA/ENB**: Jumpeados (sempre HIGH) 
-- **IN1-IN4**: Recebem PWM+direção do ESP32
-- **Regulador 5V**: Use o borne +5V para alimentar o ESP32
-- **Jumper**: Mantenha ligado para ativar o regulador interno
-- **Vantagem**: Usa apenas 4 pinos + alimentação segura do ESP32
-- **Desvantagem**: Nenhuma! Funciona perfeitamente
+- kickp | kp <0..100>
+  - Potencia do pulso de kick (%)
+  - Default: 85%
+  - Forma compacta: kp85
 
-## Segurança
-- **Timeout**: Motores param automaticamente se perder comunicação (1s)
-- **Inicialização**: Motores iniciados parados
-- **Emergency stop**: Região CENTER para parada imediata
+- brakems | bm <ms>
+  - Duracao do freio eletrico em milissegundos
+  - bm0 usa coast (saida zero sem freio)
+  - Default: 200ms
+  - Forma compacta: bm200
 
-## Próximos passos
-1. ✅ Sistema completo implementado
-2. 🔧 Teste e ajuste de calibração conforme necessário
-3. 🎯 Possíveis melhorias: aceleração suave, curve blending
+Interface:
 
----
+- echo | e on|off
+  - Liga/desliga o echo dos caracteres digitados no serial
+  - Default: on
+  - Exemplo: echo off
+  - Forma compacta: eoff
 
-## 💡 Resumo de Opções Disponíveis
+- g
+  - Le posicao atual do AS5600 (raw e graus)
 
-### 🔧 Para desenvolvedores PlatformIO:
-- Use **`src/main.cpp`** (código unificado TX/RX)
+Posicionamento tipo servo (AS5600):
 
-### 🎓 Para usuários Arduino IDE:
-- **Iniciante**: Use [Sistema Básico](arduino_versions/README_BASICO.md) 
-- **Avançado**: Use [Sistema Expandido](arduino_versions/README_EXPANSION.md)
+- q | goto <deg> [rpm]
+  - Move para a posicao angular alvo (0..360)
+  - rpm max opcional; se omitido usa default interno
+  - Exemplo: q 90 6
 
-### 📚 Documentação completa:
-- **[Visão Geral Arduino](arduino_versions/README.md)**: Escolha de versão
-- **[Sistema Básico](arduino_versions/README_BASICO.md)**: Guia completo básico
-- **[Sistema Expandido](arduino_versions/README_EXPANSION.md)**: Funcionalidades avançadas
+- qc | cancelmove
+  - Cancela movimento de posicao em andamento
 
-**Dica**: Comece com o sistema básico para entender os conceitos, depois migre para o expandido quando precisar de mais funcionalidades! 🚀
+- rr | ratedrpm <rpm>
+  - Configura RPM nominal do motor para escalar saida percentual
+  - Default pensado para seu motor: 18 rpm
+  - Exemplo: rr 18
+
+- pk | poskp <rpm/deg>
+  - Ganho proporcional do controlador de posicao
+  - Exemplo: pk 0.12
+
+- pw | poswin <deg>
+  - Janela de erro angular para considerar alvo atingido
+  - Exemplo: pw 1.0
+
+## Maquina de estados
+
+O firmware usa 4 fases:
+
+- **IDLE**: motor parado, saida = 0. Ao receber target acima de tstop, passa para KICK (ou direto para RUNNING se kick_ms=0).
+- **KICK**: aplica kick_pct durante kick_ms para vencer atrito estatico e inercial. Ao terminar, entra em RUNNING iniciando em tstart.
+- **RUNNING**: rampa normal entre current_percent e target_percent. Saida e remapeada pelo dead band.
+- **BRAKE**: aplica freio eletrico (IN1=IN2=HIGH) por brake_ms. Ao terminar, volta para IDLE.
+
+Inversao de direcao durante RUNNING:
+- O target e invertido, mas current_percent desacelera ate tstop antes de parar.
+- Ao atingir tstop, vai para IDLE, que relanca KICK no novo sentido automaticamente.
+
+## Como a rampa funciona
+
+O firmware controla:
+- target_percent: alvo definido pelo comando serial
+- current_percent: valor aplicado no instante atual
+
+A cada ciclo de controle:
+- current_percent se move gradualmente ate target_percent
+- accel_ms e usado quando aumentando modulo da velocidade
+- decel_ms e usado quando reduzindo modulo da velocidade
+- curve accel/decel ajusta o comportamento da transicao
+
+Regra geral:
+- Curva maior tende a resposta mais progressiva
+- Curva menor tende a resposta mais direta
+
+## Como o dead band funciona
+
+Motores DC tem uma tensao minima para comecar a girar (atrito estatico + dead band do driver).
+Abaixo dessa tensao o motor vibra ou nao se move, desperdicando energia.
+
+O firmware remapeia a saida:
+- Abaixo de tstop: saida = 0 (motor considerado parado)
+- Entre tstop e 100%: remapeado linearmente para [tstart..100%]
+
+Assim qualquer target > tstop resulta em pelo menos tstart de PWM no motor.
+
+Ajuste tstart ate encontrar o valor minimo em que seu motor gira confiavelmente.
+
+## Sequencia de teste sugerida
+
+1. Suba o firmware e abra monitor serial em 115200.
+2. Rode `s` para confirmar canal padrao IN3/IN4 e parametros.
+3. Comece com `l30` (limite 30%).
+4. Aplique `p10` e aumente ate o motor comecar a girar; esse valor e seu tstart real.
+5. Ajuste `ts<valor>` com o minimo encontrado acima.
+6. Teste `a300` e `z100` para suavidade de rampa.
+7. Teste `r` para inversao e observe o kick e a desaceleracao antes de inverter.
+8. Use `kp70` e `k80` para afinar o pulso de partida.
+9. Teste `b` para freio eletrico e compare com `x` (corte seco).
+10. Troque canal com `m in1` se quiser testar IN1/IN2.
+11. Use `x` ao finalizar.
+
+## Seguranca
+
+- Sempre inicie com baixa potencia (10% a 30%).
+- Use limit para proteger motor e mecanica.
+- Garanta fonte adequada para o motor.
+- Nunca deixe o motor sem supervisao em bancada.
+- Se houver aquecimento excessivo, use stop imediatamente.
+
+## Estrutura minima do projeto
+
+- platformio.ini
+- src/main.cpp
+
+## Notas
+
+- Este README descreve somente o estado atual de teste serial.
+- Conteudo antigo de projeto doador (joystick/ESP-NOW) foi descontinuado neste firmware.
