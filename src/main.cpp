@@ -9,7 +9,7 @@
 #include <string.h>
 
 // ESP32-C3 Super Mini + L298N
-// IN1/IN2 = motor A,  IN3/IN4 = motor B  (padrao deste projeto)
+// IN1/IN2 = motor A,  IN3/IN4 = motor B  (A é o padrao deste projeto)
 constexpr uint8_t  MOTOR_A_IN1            = 1;
 constexpr uint8_t  MOTOR_A_IN2            = 2;
 constexpr uint8_t  MOTOR_B_IN1            = 3;
@@ -61,7 +61,7 @@ enum class DrivePhase { IDLE, KICK, RUNNING, BRAKE };
 
 struct MotorControlState {
   // Selecao de canal
-  MotorSelection selected_motor = MotorSelection::B_IN3_IN4;
+  MotorSelection selected_motor = MotorSelection::BOTH;
 
   // Alvo e valor atual da rampa (assinados, -100..100 %)
   float  target_percent  = 0.0f;
@@ -166,6 +166,32 @@ uint8_t percentToPwm(float pct_abs) {
   return (uint8_t)roundf(clampf(pct_abs * 255.0f / 100.0f, 0.0f, 255.0f));
 }
 
+void setPwmOutputFrequency(uint8_t pin, uint32_t hz) {
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  analogWriteFrequency(pin, hz);
+#else
+  (void)pin;
+  analogWriteFrequency(hz);
+#endif
+}
+
+void setPwmOutputResolution(uint8_t pin, uint8_t bits) {
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  analogWriteResolution(pin, bits);
+#else
+  (void)pin;
+  analogWriteResolution(bits);
+#endif
+}
+
+void configurePwmOutputs(uint32_t hz, uint8_t bits) {
+  const uint8_t pins[] = {MOTOR_A_IN1, MOTOR_A_IN2, MOTOR_B_IN1, MOTOR_B_IN2};
+  for (uint8_t pin : pins) {
+    setPwmOutputFrequency(pin, hz);
+    setPwmOutputResolution(pin, bits);
+  }
+}
+
 // Remapeia [tstop..100] -> [tstart..100].
 // Abaixo de tstop retorna 0 (dead band: motor nao recebe tensao).
 float applyDeadBandRemap(float abs_pct, float tstart, float tstop) {
@@ -184,7 +210,10 @@ bool setPwmFrequencyHz(uint32_t hz) {
   if (hz < PWM_MIN_FREQUENCY_HZ || hz > PWM_MAX_FREQUENCY_HZ) {
     return false;
   }
-  analogWriteFrequency(hz);
+  const uint8_t pins[] = {MOTOR_A_IN1, MOTOR_A_IN2, MOTOR_B_IN1, MOTOR_B_IN2};
+  for (uint8_t pin : pins) {
+    setPwmOutputFrequency(pin, hz);
+  }
   g_pwm_frequency_hz = hz;
   return true;
 }
@@ -1627,7 +1656,7 @@ void setup() {
   delay(SERIAL_STARTUP_WAIT_MS);
 
   setPwmFrequencyHz(g_pwm_frequency_hz);
-  analogWriteResolution(PWM_RESOLUTION_BITS);
+  configurePwmOutputs(g_pwm_frequency_hz, PWM_RESOLUTION_BITS);
 
   CascadePositionSettings pos_settings;
   
