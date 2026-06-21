@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include <ArduinoOTA.h>
+#include <WiFi.h>
 
 #include <As5600Sensor.h>
 #include <CascadePositionController.h>
@@ -7,6 +9,13 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+
+constexpr char OTA_AP_SSID[]     = "Motor-Control-1";
+constexpr char OTA_AP_PASSWORD[] = "12345678";
+constexpr char OTA_HOSTNAME[]    = "as5600-motor-control";
+constexpr char OTA_PASSWORD[]    = "as5600-update";
+constexpr uint8_t OTA_BUTTON_PIN = 7;
+constexpr uint32_t OTA_BUTTON_HOLD_MS = 1500;
 
 // ESP32-C3 Super Mini + L298N
 // IN1/IN2 = motor A,  IN3/IN4 = motor B  (A é o padrao deste projeto)
@@ -101,6 +110,9 @@ struct MotorControlState {
 };
 
 MotorControlState g_state;
+bool g_ota_mode_active = false;
+bool g_ota_button_pressed = false;
+uint32_t g_ota_button_pressed_ms = 0;
 
 char   g_serial_line[SERIAL_LINE_BUFFER];
 size_t g_serial_index = 0;
@@ -477,6 +489,79 @@ void applyBrakeOutput() {
       setBrakeChannelPins(MOTOR_A_IN1, MOTOR_A_IN2);
       setBrakeChannelPins(MOTOR_B_IN1, MOTOR_B_IN2);
       break;
+  }
+}
+
+void stopMotorForOta() {
+  g_position_servo.cancel();
+  g_autotune.active = false;
+  g_move_tracking_active = false;
+  g_state.target_percent = 0.0f;
+  g_state.current_percent = 0.0f;
+  g_state.drive_phase = DrivePhase::IDLE;
+  applyMotorOutput(0);
+}
+
+bool setupOtaAccessPoint() {
+  WiFi.mode(WIFI_AP);
+  if (!WiFi.softAP(OTA_AP_SSID, OTA_AP_PASSWORD)) {
+    Serial.println("OTA: falha ao criar ponto de acesso");
+    return false;
+  }
+
+  ArduinoOTA.setHostname(OTA_HOSTNAME);
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+  ArduinoOTA.onStart([]() {
+    stopMotorForOta();
+    Serial.println("OTA: atualizacao iniciada; motores desativados");
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nOTA: atualizacao concluida; reiniciando");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    const unsigned int percent = total == 0 ? 0 : (progress * 100U) / total;
+    Serial.printf("\rOTA: %u%%", percent);
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("\nOTA: erro %u; reinicie a placa antes de operar o motor\n",
+                  (unsigned int)error);
+  });
+  ArduinoOTA.begin();
+
+  Serial.printf("OTA AP: SSID=%s  IP=%s  porta=3232\n",
+                OTA_AP_SSID, WiFi.softAPIP().toString().c_str());
+  return true;
+}
+
+void handleOtaMaintenanceMode() {
+  if (g_ota_mode_active) {
+    ArduinoOTA.handle();
+    applyMotorOutput(0);
+    return;
+  }
+
+  const bool button_pressed = digitalRead(OTA_BUTTON_PIN) == LOW;
+  if (!button_pressed) {
+    g_ota_button_pressed = false;
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (!g_ota_button_pressed) {
+    g_ota_button_pressed = true;
+    g_ota_button_pressed_ms = now;
+    return;
+  }
+
+  if (now - g_ota_button_pressed_ms < OTA_BUTTON_HOLD_MS) {
+    return;
+  }
+
+  stopMotorForOta();
+  g_ota_mode_active = true;
+  Serial.println("OTA: modo de manutencao ativado; controle do motor bloqueado");
+  if (!setupOtaAccessPoint()) {
+    Serial.println("OTA: reinicie a placa para voltar ao modo normal");
   }
 }
 
@@ -1695,14 +1780,19 @@ void setup() {
   pinMode(MOTOR_A_IN2, OUTPUT);
   pinMode(MOTOR_B_IN1, OUTPUT);
   pinMode(MOTOR_B_IN2, OUTPUT);
+  pinMode(OTA_BUTTON_PIN, INPUT_PULLUP);
 
   setMotorSignedPwm(0, MOTOR_A_IN1, MOTOR_A_IN2);
   setMotorSignedPwm(0, MOTOR_B_IN1, MOTOR_B_IN2);
+
+  WiFi.mode(WIFI_OFF);
 
   Serial.println("\n=== Motor PWM Tester ===");
   Serial.println("Placa: ESP32-C3 Super Mini  |  Motor padrao: IN3/IN4");
   Serial.printf("PWM: freq=%u Hz  resolucao=%u bits\n", g_pwm_frequency_hz, PWM_RESOLUTION_BITS);
   Serial.printf("I2C: SDA=%u SCL=%u\n", I2C_SDA_PIN, I2C_SCL_PIN);
+  Serial.printf("OTA: segure GPIO %u em GND por %u ms para ativar\n",
+                OTA_BUTTON_PIN, OTA_BUTTON_HOLD_MS);
   if (g_as5600.detected()) {
     Serial.printf("AS5600 detectado no endereco 0x%02X\n", g_as5600.address());
   } else {
@@ -1715,6 +1805,12 @@ void setup() {
 }
 
 void loop() {
+  handleOtaMaintenanceMode();
+  if (g_ota_mode_active) {
+    delay(1);
+    return;
+  }
+
   // Não processa serial durante movimento para não interromper a cascata PID
   if (!g_position_servo.isActive()) {
     processSerialInput();
