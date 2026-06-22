@@ -13,7 +13,7 @@ struct RepetitiveMotionConfig {
 
 class RepetitiveMotionController {
  public:
-  enum class Direction { Increasing, Decreasing };
+  enum class Direction { Increasing, Decreasing, ByNumericComparison };
 
   using StartMoveFn = void (*)(float target_deg, float rpm, Direction direction);
   using IsMoveActiveFn = bool (*)();

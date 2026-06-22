@@ -527,10 +527,10 @@ void setupWebControl() {
     const String target = g_web_server.arg("target");
     if (target == "start") {
       startAutomaticPositionMove(c.start_deg, c.end_to_start_rpm,
-                                  RepetitiveMotionController::Direction::Decreasing);
+                                  RepetitiveMotionController::Direction::ByNumericComparison);
     } else if (target == "end") {
       startAutomaticPositionMove(c.end_deg, c.start_to_end_rpm,
-                                  RepetitiveMotionController::Direction::Increasing);
+                                  RepetitiveMotionController::Direction::ByNumericComparison);
     } else {
       sendWebError(400, "Destino invalido");
       return;
@@ -1036,10 +1036,16 @@ void startAutomaticPositionMove(
   }
 
   const float limited_rpm = clampf(rpm, 0.1f, g_position_servo.settings().max_target_rpm);
-  const AdrcPositionController::MoveDirection adrc_direction =
-    direction == RepetitiveMotionController::Direction::Increasing
+  AdrcPositionController::MoveDirection adrc_direction;
+  if (direction == RepetitiveMotionController::Direction::ByNumericComparison) {
+    adrc_direction = current_deg < target_deg
       ? AdrcPositionController::MoveDirection::Clockwise
       : AdrcPositionController::MoveDirection::CounterClockwise;
+  } else {
+    adrc_direction = direction == RepetitiveMotionController::Direction::Increasing
+      ? AdrcPositionController::MoveDirection::Clockwise
+      : AdrcPositionController::MoveDirection::CounterClockwise;
+  }
   g_position_servo.startMove(target_deg, limited_rpm, adrc_direction);
   g_position_servo.primeAccumulatedAngle(current_deg);
   g_move_done_reported = false;

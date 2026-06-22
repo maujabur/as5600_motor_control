@@ -15,7 +15,9 @@ somente para logs; comandos recebidos são descartados.
 - Estado `running` persistente entre reinicializações.
 - Homing automático ao ponto inicial quando inicia com `running=on`.
 - Início → fim sempre com graus incrementando (CW).
-- Fim → início e homing sempre com graus decrementando (CCW).
+- Fim → início sempre com graus decrementando (CCW).
+- Homing e ajustes pontuais escolhem CW quando a posição atual é menor que o
+  destino; caso contrário, escolhem CCW.
 - Controle ADRC a 500 Hz, com perfil de aceleração e desaceleração.
 - Kick de partida, PWM mínimo, limite de potência e proteção de stall.
 - Interface web responsiva para operação e ajustes avançados.
@@ -71,8 +73,9 @@ das duas páginas são persistidos na NVS.
 
 ## Sequência do ciclo
 
-Ao ativar RUN, o controlador primeiro faz homing até o ponto inicial em sentido
-decrescente/CCW. Depois executa continuamente:
+Ao ativar RUN, o controlador primeiro faz homing até o ponto inicial. Se a
+posição atual for menor que o início, usa CW; caso contrário, usa CCW. Depois
+executa continuamente:
 
 1. espera no início;
 2. move para o fim incrementando graus/CW;

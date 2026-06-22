@@ -22,7 +22,7 @@ void RepetitiveMotionController::setRunning(bool running, uint32_t now_ms) {
   // Ao habilitar, sincroniza primeiro no ponto inicial. Assim o primeiro ciclo
   // completo sempre respeita: pausa inicial -> ida -> pausa final -> volta.
   beginMove(config_.start_deg, config_.end_to_start_rpm,
-            Direction::Decreasing, Phase::TO_START);
+            Direction::ByNumericComparison, Phase::TO_START);
 }
 
 void RepetitiveMotionController::stop() {
