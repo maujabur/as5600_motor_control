@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "repetitive_motion_web_page.h"
+#include "control_settings_web_page.h"
 
 #if __has_include("wifi_credentials.h")
 #include "wifi_credentials.h"
@@ -183,6 +184,7 @@ bool isAutomaticPositionMoveActive();
 void stopAutomaticPositionMove();
 void applyMotorOutput(int16_t signed_pwm);
 float clampf(float v, float lo, float hi);
+bool setPwmFrequencyHz(uint32_t hz);
 
 RepetitiveMotionController g_repetitive_motion({
   startAutomaticPositionMove,
@@ -205,6 +207,37 @@ void loadRepetitiveMotionPreferences() {
     return;
   }
 
+  AdrcPositionSettings adrc = g_position_servo.settings();
+  adrc.control_bandwidth = clampf(g_repetitive_preferences.getFloat(
+    "adrc_wc", adrc.control_bandwidth), 1.0f, 100.0f);
+  adrc.observer_bandwidth = clampf(g_repetitive_preferences.getFloat(
+    "adrc_wo", adrc.observer_bandwidth), 1.0f, 300.0f);
+  adrc.plant_gain = clampf(g_repetitive_preferences.getFloat(
+    "adrc_b0", adrc.plant_gain), 1.0f, 2000.0f);
+  adrc.max_target_rpm = clampf(g_repetitive_preferences.getFloat(
+    "max_rpm", adrc.max_target_rpm), 0.1f, 10.0f);
+  adrc.physical_max_rpm = clampf(g_repetitive_preferences.getFloat(
+    "phys_rpm", adrc.physical_max_rpm), 0.1f, 10.0f);
+  adrc.max_target_rpm = fminf(adrc.max_target_rpm, adrc.physical_max_rpm);
+  adrc.stop_window_deg = clampf(g_repetitive_preferences.getFloat(
+    "stop_win", adrc.stop_window_deg), 0.2f, 20.0f);
+  adrc.accel_ramp_ms = (uint16_t)constrain(
+    g_repetitive_preferences.getUInt("accel_ms", adrc.accel_ramp_ms), 50U, 2000U);
+  adrc.decel_ramp_ms = (uint16_t)constrain(
+    g_repetitive_preferences.getUInt("decel_ms", adrc.decel_ramp_ms), 50U, 2000U);
+  adrc.kick_pwm_percent = clampf(g_repetitive_preferences.getFloat(
+    "kick_pct", adrc.kick_pwm_percent), 0.0f, 100.0f);
+  adrc.kick_ms = (uint16_t)constrain(
+    g_repetitive_preferences.getUInt("kick_ms", adrc.kick_ms), 0U, 1000U);
+  adrc.samples_to_stop = (uint16_t)constrain(
+    g_repetitive_preferences.getUInt("stop_samples", adrc.samples_to_stop), 1U, 20U);
+  g_position_servo.setSettings(adrc);
+  g_state.power_limit_percent = (uint8_t)constrain(
+    g_repetitive_preferences.getUInt("power_limit", g_state.power_limit_percent), 0U, 100U);
+  g_pwm_frequency_hz = constrain(
+    g_repetitive_preferences.getUInt("pwm_hz", g_pwm_frequency_hz),
+    PWM_MIN_FREQUENCY_HZ, PWM_MAX_FREQUENCY_HZ);
+
   RepetitiveMotionConfig c = g_repetitive_motion.config();
   c.start_deg = g_repetitive_preferences.getFloat("start_deg", c.start_deg);
   c.end_deg = g_repetitive_preferences.getFloat("end_deg", c.end_deg);
@@ -221,14 +254,6 @@ void loadRepetitiveMotionPreferences() {
   g_repetitive_run_on_boot = g_repetitive_preferences.getBool("running", false);
   g_persisted_repetitive_running = g_repetitive_run_on_boot;
 
-  AdrcPositionSettings adrc = g_position_servo.settings();
-  adrc.control_bandwidth = g_repetitive_preferences.getFloat(
-    "adrc_wc", adrc.control_bandwidth);
-  adrc.observer_bandwidth = g_repetitive_preferences.getFloat(
-    "adrc_wo", adrc.observer_bandwidth);
-  adrc.plant_gain = g_repetitive_preferences.getFloat(
-    "adrc_b0", adrc.plant_gain);
-  g_position_servo.setSettings(adrc);
 }
 
 void saveRepetitiveMotionConfig() {
@@ -248,6 +273,24 @@ void saveAdrcSettings() {
   g_repetitive_preferences.putFloat("adrc_wc", s.control_bandwidth);
   g_repetitive_preferences.putFloat("adrc_wo", s.observer_bandwidth);
   g_repetitive_preferences.putFloat("adrc_b0", s.plant_gain);
+}
+
+void saveControlSettings() {
+  if (!g_repetitive_preferences_ready) return;
+  const AdrcPositionSettings& s = g_position_servo.settings();
+  g_repetitive_preferences.putFloat("adrc_wc", s.control_bandwidth);
+  g_repetitive_preferences.putFloat("adrc_wo", s.observer_bandwidth);
+  g_repetitive_preferences.putFloat("adrc_b0", s.plant_gain);
+  g_repetitive_preferences.putFloat("max_rpm", s.max_target_rpm);
+  g_repetitive_preferences.putFloat("phys_rpm", s.physical_max_rpm);
+  g_repetitive_preferences.putFloat("stop_win", s.stop_window_deg);
+  g_repetitive_preferences.putUInt("accel_ms", s.accel_ramp_ms);
+  g_repetitive_preferences.putUInt("decel_ms", s.decel_ramp_ms);
+  g_repetitive_preferences.putFloat("kick_pct", s.kick_pwm_percent);
+  g_repetitive_preferences.putUInt("kick_ms", s.kick_ms);
+  g_repetitive_preferences.putUInt("stop_samples", s.samples_to_stop);
+  g_repetitive_preferences.putUInt("power_limit", g_state.power_limit_percent);
+  g_repetitive_preferences.putUInt("pwm_hz", g_pwm_frequency_hz);
 }
 
 void setRepetitiveRunning(bool running, bool persist = true) {
@@ -306,11 +349,103 @@ void sendWebError(int status_code, const char* message) {
   g_web_server.send(status_code, "application/json", json);
 }
 
+void sendWebSettings() {
+  const AdrcPositionSettings& s = g_position_servo.settings();
+  String json;
+  json.reserve(360);
+  json += F("{\"canEdit\":");
+  json += (!g_repetitive_motion.running() && !g_position_servo.isActive() &&
+           !g_ota_update_in_progress) ? F("true") : F("false");
+  json += F(",\"wc\":"); json += String(s.control_bandwidth, 2);
+  json += F(",\"wo\":"); json += String(s.observer_bandwidth, 2);
+  json += F(",\"b0\":"); json += String(s.plant_gain, 2);
+  json += F(",\"maxRpm\":"); json += String(s.max_target_rpm, 2);
+  json += F(",\"physRpm\":"); json += String(s.physical_max_rpm, 2);
+  json += F(",\"powerLimit\":"); json += String(g_state.power_limit_percent);
+  json += F(",\"pwmHz\":"); json += String(g_pwm_frequency_hz);
+  json += F(",\"stopWindow\":"); json += String(s.stop_window_deg, 2);
+  json += F(",\"stopSamples\":"); json += String(s.samples_to_stop);
+  json += F(",\"accelMs\":"); json += String(s.accel_ramp_ms);
+  json += F(",\"decelMs\":"); json += String(s.decel_ramp_ms);
+  json += F(",\"kickPct\":"); json += String(s.kick_pwm_percent, 1);
+  json += F(",\"kickMs\":"); json += String(s.kick_ms);
+  json += '}';
+  g_web_server.send(200, "application/json", json);
+}
+
 void setupWebControl() {
   if (g_web_server_started) return;
 
   g_web_server.on("/", HTTP_GET, []() {
     g_web_server.send_P(200, "text/html; charset=utf-8", REPETITIVE_MOTION_WEB_PAGE);
+  });
+  g_web_server.on("/settings", HTTP_GET, []() {
+    g_web_server.send_P(200, "text/html; charset=utf-8", CONTROL_SETTINGS_WEB_PAGE);
+  });
+  g_web_server.on("/api/settings", HTTP_GET, []() { sendWebSettings(); });
+  g_web_server.on("/api/settings", HTTP_POST, []() {
+    if (g_repetitive_motion.running() || g_position_servo.isActive() ||
+        g_ota_update_in_progress) {
+      sendWebError(409, "Pare o motor antes de alterar os ajustes");
+      return;
+    }
+    float wc, wo, b0, max_rpm, phys_rpm, power_limit, pwm_hz;
+    float stop_window, stop_samples, accel_ms, decel_ms, kick_pct, kick_ms;
+    if (!parseWebNumber("wc", &wc) || !parseWebNumber("wo", &wo) ||
+        !parseWebNumber("b0", &b0) || !parseWebNumber("maxRpm", &max_rpm) ||
+        !parseWebNumber("physRpm", &phys_rpm) ||
+        !parseWebNumber("powerLimit", &power_limit) ||
+        !parseWebNumber("pwmHz", &pwm_hz) ||
+        !parseWebNumber("stopWindow", &stop_window) ||
+        !parseWebNumber("stopSamples", &stop_samples) ||
+        !parseWebNumber("accelMs", &accel_ms) ||
+        !parseWebNumber("decelMs", &decel_ms) ||
+        !parseWebNumber("kickPct", &kick_pct) ||
+        !parseWebNumber("kickMs", &kick_ms)) {
+      sendWebError(400, "Parametros invalidos ou incompletos");
+      return;
+    }
+    if (wc < 1.0f || wc > 100.0f || wo < 1.0f || wo > 300.0f ||
+        b0 < 1.0f || b0 > 2000.0f || max_rpm < 0.1f || max_rpm > 10.0f ||
+        phys_rpm < 0.1f || phys_rpm > 10.0f || max_rpm > phys_rpm ||
+        power_limit < 0.0f || power_limit > 100.0f ||
+        pwm_hz < PWM_MIN_FREQUENCY_HZ || pwm_hz > PWM_MAX_FREQUENCY_HZ ||
+        stop_window < 0.2f || stop_window > 20.0f ||
+        stop_samples < 1.0f || stop_samples > 20.0f ||
+        accel_ms < 50.0f || accel_ms > 2000.0f ||
+        decel_ms < 50.0f || decel_ms > 2000.0f ||
+        kick_pct < 0.0f || kick_pct > 100.0f ||
+        kick_ms < 0.0f || kick_ms > 1000.0f) {
+      sendWebError(422, "Valor fora da faixa ou RPM maxima acima da RPM fisica");
+      return;
+    }
+
+    AdrcPositionSettings s = g_position_servo.settings();
+    s.control_bandwidth = wc;
+    s.observer_bandwidth = wo;
+    s.plant_gain = b0;
+    s.max_target_rpm = max_rpm;
+    s.physical_max_rpm = phys_rpm;
+    s.stop_window_deg = stop_window;
+    s.samples_to_stop = (uint16_t)lroundf(stop_samples);
+    s.accel_ramp_ms = (uint16_t)lroundf(accel_ms);
+    s.decel_ramp_ms = (uint16_t)lroundf(decel_ms);
+    s.kick_pwm_percent = kick_pct;
+    s.kick_ms = (uint16_t)lroundf(kick_ms);
+    g_position_servo.setSettings(s);
+    g_state.power_limit_percent = (uint8_t)lroundf(power_limit);
+    if (!setPwmFrequencyHz((uint32_t)lroundf(pwm_hz))) {
+      sendWebError(500, "Falha ao aplicar frequencia PWM");
+      return;
+    }
+
+    RepetitiveMotionConfig c = g_repetitive_motion.config();
+    c.start_to_end_rpm = fminf(c.start_to_end_rpm, max_rpm);
+    c.end_to_start_rpm = fminf(c.end_to_start_rpm, max_rpm);
+    g_repetitive_motion.setConfig(c);
+    saveRepetitiveMotionConfig();
+    saveControlSettings();
+    sendWebSettings();
   });
   g_web_server.on("/api/status", HTTP_GET, []() { sendWebStatus(); });
   g_web_server.on("/api/run", HTTP_POST, []() {
@@ -2073,6 +2208,8 @@ void setup() {
   
   g_position_servo.setSettings(pos_settings);
   loadRepetitiveMotionPreferences();
+  setPwmFrequencyHz(g_pwm_frequency_hz);
+  configurePwmOutputs(g_pwm_frequency_hz, PWM_RESOLUTION_BITS);
 
   g_as5600.begin(Wire, I2C_SDA_PIN, I2C_SCL_PIN);
 
