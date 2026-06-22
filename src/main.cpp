@@ -16,6 +16,13 @@
 
 #include "repetitive_motion_web_page.h"
 
+#if __has_include("wifi_credentials.h")
+#include "wifi_credentials.h"
+#else
+#define WIFI_STA_SSID ""
+#define WIFI_STA_PASSWORD ""
+#endif
+
 #ifndef MOTOR_CONTROL_UNIT
 #define MOTOR_CONTROL_UNIT 1
 #endif
@@ -26,8 +33,9 @@ static_assert(MOTOR_CONTROL_UNIT >= 1 && MOTOR_CONTROL_UNIT <= 99,
 constexpr uint8_t MOTOR_CONTROL_UNIT_NUMBER = MOTOR_CONTROL_UNIT;
 char OTA_AP_SSID[20] = {0};
 constexpr char OTA_AP_PASSWORD[] = "12345678";
-constexpr char OTA_HOSTNAME[]    = "as5600-motor-control";
+char OTA_HOSTNAME[28] = {0};
 constexpr char OTA_PASSWORD[]    = "as5600-update";
+constexpr uint32_t WIFI_STA_CONNECT_TIMEOUT_MS = 12000;
 // Para seis unidades: 01/04 -> canal 1, 02/05 -> canal 6, 03/06 -> canal 11.
 // Os tres canais nao se sobrepoem e recebem exatamente duas unidades cada.
 constexpr uint8_t WIFI_AP_CHANNEL_SLOT = (MOTOR_CONTROL_UNIT_NUMBER - 1U) % 3U;
@@ -724,6 +732,31 @@ void stopMotorForOta() {
   applyMotorOutput(0);
 }
 
+bool setupOtaAndWebServices() {
+  ArduinoOTA.setHostname(OTA_HOSTNAME);
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+  ArduinoOTA.onStart([]() {
+    g_ota_update_in_progress = true;
+    stopMotorForOta();
+    Serial.println("OTA: atualizacao iniciada; motores desativados");
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nOTA: atualizacao concluida; reiniciando");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    const unsigned int percent = total == 0 ? 0 : (progress * 100U) / total;
+    Serial.printf("\rOTA: %u%%", percent);
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("\nOTA: erro %u; reinicie a placa antes de operar o motor\n",
+                  (unsigned int)error);
+  });
+  ArduinoOTA.begin();
+  setupWebControl();
+
+  return true;
+}
+
 bool setupOtaAccessPoint() {
   snprintf(OTA_AP_SSID, sizeof(OTA_AP_SSID), "Motor-Control-%02u",
            MOTOR_CONTROL_UNIT_NUMBER);
@@ -734,8 +767,7 @@ bool setupOtaAccessPoint() {
   }
 
   // HT40 pode fazer alguns scanners mostrarem o canal central (por exemplo 9
-  // para um AP cujo canal primario e 11). Fixamos HT20 e reafirmamos o canal
-  // primario diretamente no driver para evitar essa ambiguidade.
+  // para um AP cujo canal primario e 11). Fixamos HT20 e reafirmamos o canal.
   if (!WiFi.softAPbandwidth(WIFI_BW_HT20)) {
     Serial.println("OTA/WEB: falha ao fixar largura WiFi em 20 MHz");
     WiFi.softAPdisconnect(true);
@@ -766,30 +798,47 @@ bool setupOtaAccessPoint() {
     return false;
   }
 
-  ArduinoOTA.setHostname(OTA_HOSTNAME);
-  ArduinoOTA.setPassword(OTA_PASSWORD);
-  ArduinoOTA.onStart([]() {
-    g_ota_update_in_progress = true;
-    stopMotorForOta();
-    Serial.println("OTA: atualizacao iniciada; motores desativados");
-  });
-  ArduinoOTA.onEnd([]() {
-    Serial.println("\nOTA: atualizacao concluida; reiniciando");
-  });
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    const unsigned int percent = total == 0 ? 0 : (progress * 100U) / total;
-    Serial.printf("\rOTA: %u%%", percent);
-  });
-  ArduinoOTA.onError([](ota_error_t error) {
-    Serial.printf("\nOTA: erro %u; reinicie a placa antes de operar o motor\n",
-                  (unsigned int)error);
-  });
-  ArduinoOTA.begin();
-  setupWebControl();
+  setupOtaAndWebServices();
 
   Serial.printf("OTA/WEB AP: SSID=%s  canal=%u  largura=20MHz  IP=%s  OTA=3232 WEB=80\n",
                 OTA_AP_SSID, actual_channel, WiFi.softAPIP().toString().c_str());
   return true;
+}
+
+bool setupStationOrAccessPoint() {
+  snprintf(OTA_AP_SSID, sizeof(OTA_AP_SSID), "Motor-Control-%02u",
+           MOTOR_CONTROL_UNIT_NUMBER);
+  snprintf(OTA_HOSTNAME, sizeof(OTA_HOSTNAME), "as5600-motor-%02u",
+           MOTOR_CONTROL_UNIT_NUMBER);
+
+  if (strlen(WIFI_STA_SSID) > 0) {
+    Serial.printf("WiFi: conectando a %s", WIFI_STA_SSID);
+    WiFi.mode(WIFI_STA);
+    WiFi.setHostname(OTA_HOSTNAME);
+    WiFi.begin(WIFI_STA_SSID, WIFI_STA_PASSWORD);
+    const uint32_t started_ms = millis();
+    while (WiFi.status() != WL_CONNECTED &&
+           millis() - started_ms < WIFI_STA_CONNECT_TIMEOUT_MS) {
+      delay(250);
+      Serial.print('.');
+    }
+    Serial.println();
+
+    if (WiFi.status() == WL_CONNECTED) {
+      setupOtaAndWebServices();
+      Serial.printf("OTA/WEB STA: SSID=%s  IP=%s  OTA=3232 WEB=80\n",
+                    WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+      return true;
+    }
+
+    Serial.println("WiFi: rede nao encontrada; iniciando AP de contingencia");
+    WiFi.disconnect(true);
+    delay(100);
+  } else {
+    Serial.println("WiFi: credenciais STA ausentes; iniciando AP de contingencia");
+  }
+
+  return setupOtaAccessPoint();
 }
 
 void startAutomaticPositionMove(float target_deg, float rpm) {
@@ -2184,16 +2233,21 @@ void setup() {
 
   WiFi.mode(WIFI_OFF);
 
-  // O painel e o OTA ficam disponiveis continuamente. Somente o inicio de uma
-  // transferencia OTA interrompe o motor (callback ArduinoOTA.onStart).
-  g_ota_mode_active = setupOtaAccessPoint();
+  // Tenta a rede local primeiro. Se ela nao estiver disponivel, cria o AP de
+  // contingencia. Somente uma transferencia OTA interrompe o motor.
+  g_ota_mode_active = setupStationOrAccessPoint();
 
   Serial.println("\n=== Motor PWM Tester ===");
   Serial.println("Placa: ESP32-C3 Super Mini  |  Motor padrao: IN3/IN4");
   Serial.printf("PWM: freq=%u Hz  resolucao=%u bits\n", g_pwm_frequency_hz, PWM_RESOLUTION_BITS);
   Serial.printf("I2C: SDA=%u SCL=%u\n", I2C_SDA_PIN, I2C_SCL_PIN);
-  Serial.printf("WiFi: AP sempre ativo  SSID=%s  canal=%u  painel=http://192.168.4.1/\n",
-                OTA_AP_SSID, WIFI_AP_CHANNEL);
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("WiFi: conectado a %s  painel=http://%s/\n",
+                  WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+  } else {
+    Serial.printf("WiFi: AP de contingencia  SSID=%s  canal=%u  painel=http://192.168.4.1/\n",
+                  OTA_AP_SSID, WIFI_AP_CHANNEL);
+  }
   if (g_as5600.detected()) {
     Serial.printf("AS5600 detectado no endereco 0x%02X\n", g_as5600.address());
   } else {
