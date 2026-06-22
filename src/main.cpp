@@ -3,6 +3,7 @@
 #include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 
 #include <As5600Sensor.h>
 #include <CascadePositionController.h>
@@ -15,11 +16,23 @@
 
 #include "repetitive_motion_web_page.h"
 
-constexpr char OTA_AP_SSID[]     = "Motor-Control-1";
+#ifndef MOTOR_CONTROL_UNIT
+#define MOTOR_CONTROL_UNIT 1
+#endif
+
+static_assert(MOTOR_CONTROL_UNIT >= 1 && MOTOR_CONTROL_UNIT <= 99,
+              "MOTOR_CONTROL_UNIT deve estar entre 1 e 99");
+
+constexpr uint8_t MOTOR_CONTROL_UNIT_NUMBER = MOTOR_CONTROL_UNIT;
+char OTA_AP_SSID[20] = {0};
 constexpr char OTA_AP_PASSWORD[] = "12345678";
 constexpr char OTA_HOSTNAME[]    = "as5600-motor-control";
 constexpr char OTA_PASSWORD[]    = "as5600-update";
-constexpr uint8_t WIFI_AP_CHANNEL = 6;
+// Para seis unidades: 01/04 -> canal 1, 02/05 -> canal 6, 03/06 -> canal 11.
+// Os tres canais nao se sobrepoem e recebem exatamente duas unidades cada.
+constexpr uint8_t WIFI_AP_CHANNEL_SLOT = (MOTOR_CONTROL_UNIT_NUMBER - 1U) % 3U;
+constexpr uint8_t WIFI_AP_CHANNEL = WIFI_AP_CHANNEL_SLOT == 0U ? 1U
+                                    : WIFI_AP_CHANNEL_SLOT == 1U ? 6U : 11U;
 constexpr uint8_t OTA_BUTTON_PIN = 7;
 constexpr uint32_t OTA_BUTTON_HOLD_MS = 1500;
 
@@ -256,6 +269,8 @@ void sendWebStatus(int status_code = 200) {
   json.reserve(320);
   json += F("{\"running\":");
   json += g_repetitive_motion.running() ? F("true") : F("false");
+  json += F(",\"moveActive\":");
+  json += g_position_servo.isActive() ? F("true") : F("false");
   json += F(",\"phase\":\"");
   json += g_repetitive_motion.phaseText();
   json += F("\",\"sensor\":");
@@ -303,6 +318,35 @@ void setupWebControl() {
       return;
     }
     setRepetitiveRunning(requested);
+    sendWebStatus();
+  });
+  g_web_server.on("/api/adjust", HTTP_POST, []() {
+    if (g_repetitive_motion.running() || g_position_servo.isActive()) {
+      sendWebError(409, "Ajuste permitido somente com o motor parado");
+      return;
+    }
+    if (g_ota_update_in_progress) {
+      sendWebError(409, "Atualizacao OTA em andamento");
+      return;
+    }
+    if (!g_as5600.detected()) {
+      sendWebError(409, "AS5600 nao detectado");
+      return;
+    }
+    if (!g_web_server.hasArg("target")) {
+      sendWebError(400, "Destino ausente");
+      return;
+    }
+    const RepetitiveMotionConfig& c = g_repetitive_motion.config();
+    const String target = g_web_server.arg("target");
+    if (target == "start") {
+      startAutomaticPositionMove(c.start_deg, c.end_to_start_rpm);
+    } else if (target == "end") {
+      startAutomaticPositionMove(c.end_deg, c.start_to_end_rpm);
+    } else {
+      sendWebError(400, "Destino invalido");
+      return;
+    }
     sendWebStatus();
   });
   g_web_server.on("/api/config", HTTP_POST, []() {
@@ -681,9 +725,44 @@ void stopMotorForOta() {
 }
 
 bool setupOtaAccessPoint() {
+  snprintf(OTA_AP_SSID, sizeof(OTA_AP_SSID), "Motor-Control-%02u",
+           MOTOR_CONTROL_UNIT_NUMBER);
   WiFi.mode(WIFI_AP);
   if (!WiFi.softAP(OTA_AP_SSID, OTA_AP_PASSWORD, WIFI_AP_CHANNEL)) {
     Serial.println("OTA: falha ao criar ponto de acesso");
+    return false;
+  }
+
+  // HT40 pode fazer alguns scanners mostrarem o canal central (por exemplo 9
+  // para um AP cujo canal primario e 11). Fixamos HT20 e reafirmamos o canal
+  // primario diretamente no driver para evitar essa ambiguidade.
+  if (!WiFi.softAPbandwidth(WIFI_BW_HT20)) {
+    Serial.println("OTA/WEB: falha ao fixar largura WiFi em 20 MHz");
+    WiFi.softAPdisconnect(true);
+    return false;
+  }
+  const esp_err_t channel_result =
+    esp_wifi_set_channel(WIFI_AP_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  if (channel_result != ESP_OK) {
+    Serial.printf("OTA/WEB: falha ao fixar canal WiFi: %s\n",
+                  esp_err_to_name(channel_result));
+    WiFi.softAPdisconnect(true);
+    return false;
+  }
+
+  uint8_t actual_channel = 0;
+  wifi_second_chan_t actual_secondary = WIFI_SECOND_CHAN_NONE;
+  wifi_bandwidth_t actual_bandwidth = WIFI_BW_HT20;
+  const esp_err_t channel_read_result =
+    esp_wifi_get_channel(&actual_channel, &actual_secondary);
+  const esp_err_t bandwidth_read_result =
+    esp_wifi_get_bandwidth(WIFI_IF_AP, &actual_bandwidth);
+  if (channel_read_result != ESP_OK || bandwidth_read_result != ESP_OK ||
+      actual_channel != WIFI_AP_CHANNEL || actual_secondary != WIFI_SECOND_CHAN_NONE ||
+      actual_bandwidth != WIFI_BW_HT20) {
+    Serial.printf("OTA/WEB: configuracao WiFi divergente (canal=%u secundario=%d largura=%d)\n",
+                  actual_channel, (int)actual_secondary, (int)actual_bandwidth);
+    WiFi.softAPdisconnect(true);
     return false;
   }
 
@@ -708,8 +787,8 @@ bool setupOtaAccessPoint() {
   ArduinoOTA.begin();
   setupWebControl();
 
-  Serial.printf("OTA/WEB AP: SSID=%s  canal=%u  IP=%s  OTA=3232 WEB=80\n",
-                OTA_AP_SSID, WIFI_AP_CHANNEL, WiFi.softAPIP().toString().c_str());
+  Serial.printf("OTA/WEB AP: SSID=%s  canal=%u  largura=20MHz  IP=%s  OTA=3232 WEB=80\n",
+                OTA_AP_SSID, actual_channel, WiFi.softAPIP().toString().c_str());
   return true;
 }
 
