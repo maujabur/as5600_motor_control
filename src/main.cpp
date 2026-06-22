@@ -334,7 +334,9 @@ void sendWebStatus(int status_code = 200) {
   const bool sensor_ok = g_as5600.detected() && g_as5600.readAngleDeg(&angle_deg);
   String json;
   json.reserve(320);
-  json += F("{\"running\":");
+  json += F("{\"unit\":");
+  json += String(MOTOR_CONTROL_UNIT_NUMBER);
+  json += F(",\"running\":");
   json += g_repetitive_motion.running() ? F("true") : F("false");
   json += F(",\"moveActive\":");
   json += g_position_servo.isActive() ? F("true") : F("false");

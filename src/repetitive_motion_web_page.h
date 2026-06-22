@@ -9,7 +9,7 @@ static const char REPETITIVE_MOTION_WEB_PAGE[] PROGMEM = R"HTML(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0b1114">
-<title>Motion Unit 01</title>
+<title>Motion Unit</title>
 <style>
 :root{--bg:#0b1114;--panel:#11191d;--line:#344047;--muted:#8e999f;--text:#e9edf0;--cyan:#29b9e8;--green:#39bf51;--red:#e43131;--field:#0c1215}
 *{box-sizing:border-box}html{background:var(--bg);color:var(--text);font-family:"Arial Narrow","Roboto Condensed",Arial,sans-serif}body{margin:0;min-height:100vh;background:var(--bg)}
@@ -22,7 +22,7 @@ section{padding:18px 20px;border-bottom:1px solid var(--line)}h2{margin:0 0 15px
 </style>
 </head>
 <body>
-<header class="top"><span>MOTION UNIT 01</span><span class="online">Wi-Fi conectado</span><span class="ota" id="ota">OTA/AP: IDLE</span></header>
+<header class="top"><span id="unitLabel">MOTION UNIT --</span><span class="online">Wi-Fi conectado</span><span class="ota" id="ota">OTA/AP: IDLE</span></header>
 <main>
   <div class="instrument">
     <canvas id="gauge" width="720" height="420" aria-label="Indicador angular"></canvas>
@@ -53,7 +53,7 @@ function drawGauge(){const c=$('gauge'),x=c.getContext('2d'),w=c.width,h=c.heigh
 async function api(path,body){let o={method:body?'POST':'GET'};if(body){o.headers={'Content-Type':'application/x-www-form-urlencoded'};o.body=new URLSearchParams(body)}let r=await fetch(path,o),j=await r.json();if(!r.ok)throw Error(j.error||'Falha na operação');return j}
 let messageTimer;
 function setMessage(text,error=false){clearTimeout(messageTimer);const el=$('message');el.textContent=text;el.className='message'+(error?' error':'');if(text)messageTimer=setTimeout(()=>{el.textContent='';el.className='message'},5000)}
-function render(s){const phases={STOPPED:'EM REPOUSO',TO_END:'INDO AO FIM',DWELL_END:'PAUSA NO FIM',TO_START:'INDO AO INÍCIO',DWELL_START:'PAUSA NO INÍCIO'};last={start:s.start,end:s.end,angle:s.angle||0};$('phase').textContent=s.stall?'FALHA: MOTOR TRAVADO':(s.moveActive&&!s.running?'AJUSTANDO POSIÇÃO':(phases[s.phase]||s.phase));$('angle').textContent=s.sensor?s.angle.toFixed(1)+'°':'SEM SENSOR';$('run').disabled=s.running||s.moveActive||s.otaBusy;$('stop').disabled=!s.running&&!s.moveActive;const canAdjust=!s.running&&!s.moveActive&&!s.otaBusy&&s.sensor;$('goStart').disabled=!canAdjust;$('goEnd').disabled=!canAdjust;$('ota').textContent=s.otaBusy?'OTA/AP: UPDATE':'OTA/AP: IDLE';if(!editing){$('start').value=s.start.toFixed(1);$('end').value=s.end.toFixed(1);$('rpmOut').value=s.rpmOut.toFixed(2);$('rpmBack').value=s.rpmBack.toFixed(2);$('waitStart').value=s.waitStart;$('waitEnd').value=s.waitEnd;$('rpmOut').max=s.maxRpm;$('rpmBack').max=s.maxRpm}drawGauge()}
+function render(s){const unit=String(s.unit).padStart(2,'0'),phases={STOPPED:'EM REPOUSO',TO_END:'INDO AO FIM',DWELL_END:'PAUSA NO FIM',TO_START:'INDO AO INÍCIO',DWELL_START:'PAUSA NO INÍCIO'};$('unitLabel').textContent='MOTION UNIT '+unit;document.title='Motion Unit '+unit;last={start:s.start,end:s.end,angle:s.angle||0};$('phase').textContent=s.stall?'FALHA: MOTOR TRAVADO':(s.moveActive&&!s.running?'AJUSTANDO POSIÇÃO':(phases[s.phase]||s.phase));$('angle').textContent=s.sensor?s.angle.toFixed(1)+'°':'SEM SENSOR';$('run').disabled=s.running||s.moveActive||s.otaBusy;$('stop').disabled=!s.running&&!s.moveActive;const canAdjust=!s.running&&!s.moveActive&&!s.otaBusy&&s.sensor;$('goStart').disabled=!canAdjust;$('goEnd').disabled=!canAdjust;$('ota').textContent=s.otaBusy?'OTA/AP: UPDATE':'OTA/AP: IDLE';if(!editing){$('start').value=s.start.toFixed(1);$('end').value=s.end.toFixed(1);$('rpmOut').value=s.rpmOut.toFixed(2);$('rpmBack').value=s.rpmBack.toFixed(2);$('waitStart').value=s.waitStart;$('waitEnd').value=s.waitEnd;$('rpmOut').max=s.maxRpm;$('rpmBack').max=s.maxRpm}drawGauge()}
 async function refresh(){try{render(await api('/api/status'))}catch(e){setMessage('Sem comunicação com o controlador',true)}}
 $('run').onclick=async()=>{try{render(await api('/api/run',{running:'1'}));setMessage('Homing iniciado')}catch(e){setMessage(e.message,true)}};
 $('stop').onclick=async()=>{try{render(await api('/api/run',{running:'0'}));setMessage('Movimento parado')}catch(e){setMessage(e.message,true)}};
