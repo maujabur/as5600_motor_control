@@ -537,6 +537,45 @@ void setupWebControl() {
     }
     sendWebStatus();
   });
+  g_web_server.on("/api/manual-move", HTTP_POST, []() {
+    if (g_repetitive_motion.running() || g_position_servo.isActive() ||
+        g_ota_update_in_progress) {
+      sendWebError(409, "Movimento avulso permitido somente com o motor parado");
+      return;
+    }
+    if (!g_as5600.detected()) {
+      sendWebError(409, "AS5600 nao detectado");
+      return;
+    }
+
+    float target_deg = 0.0f;
+    float rpm = 0.0f;
+    if (!parseWebNumber("target", &target_deg) ||
+        !parseWebNumber("rpm", &rpm)) {
+      sendWebError(400, "Destino ou RPM invalido");
+      return;
+    }
+    const float max_rpm = g_position_servo.settings().max_target_rpm;
+    if (target_deg < 0.0f || target_deg >= 360.0f ||
+        rpm < 0.1f || rpm > max_rpm) {
+      sendWebError(422, "Destino ou RPM fora da faixa permitida");
+      return;
+    }
+
+    float current_deg = 0.0f;
+    if (!g_as5600.readAngleDeg(&current_deg)) {
+      sendWebError(503, "Falha ao ler AS5600");
+      return;
+    }
+
+    g_adrc_stall_fault = false;
+    g_position_servo.startMove(
+      target_deg, rpm, AdrcPositionController::MoveDirection::Shortest);
+    g_position_servo.primeAccumulatedAngle(current_deg);
+    g_move_done_reported = false;
+    g_move_start_ms = millis();
+    sendWebStatus();
+  });
   g_web_server.on("/api/config", HTTP_POST, []() {
     float start = 0.0f, end = 0.0f, rpm_out = 0.0f, rpm_back = 0.0f;
     float wait_start = 0.0f, wait_end = 0.0f;
