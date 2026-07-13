@@ -9,15 +9,12 @@ somente para logs; comandos recebidos são descartados.
 
 ## Funcionalidades
 
-- Pontos inicial e final configuráveis entre 0 e 360 graus.
-- RPM independente para ida e volta.
-- Espera independente nos dois extremos.
+- Sequência configurável com um passo inicial e de 1 a 16 passos cíclicos.
+- Posição, RPM, espera e sentido independentes em cada passo.
+- Sentido por passo: caminho mais curto, horário (CW) ou anti-horário (CCW).
 - Estado `running` persistente entre reinicializações.
-- Homing automático ao ponto inicial quando inicia com `running=on`.
-- Início → fim sempre com graus incrementando (CW).
-- Fim → início sempre com graus decrementando (CCW).
-- Homing e ajustes pontuais escolhem CW quando a posição atual é menor que o
-  destino; caso contrário, escolhem CCW.
+- Execução automática do passo 0 quando inicia com `running=on`.
+- Movimento avulso para qualquer ângulo pelo caminho mais curto, sem persistência.
 - Controle ADRC a 500 Hz, com perfil de aceleração e desaceleração.
 - Kick de partida, PWM mínimo, limite de potência e proteção de stall.
 - Interface web responsiva para operação e ajustes avançados.
@@ -51,10 +48,10 @@ motor não deve passar pelo regulador da placa.
 
 - Visualização da posição angular e fase atual.
 - RUN e STOP.
-- Posição inicial e final.
-- RPM de ida e volta.
-- Espera no início e no fim.
-- Movimento pontual para o início ou para o fim quando parado.
+- Passo 0 de inicialização, executado uma vez a cada RUN.
+- Tabela cíclica variável com até 16 passos.
+- Inclusão, exclusão e reordenação de passos quando parado.
+- Movimento avulso com posição e RPM, sempre pelo caminho mais curto.
 
 ### Ajustes avançados — `/settings`
 
@@ -73,14 +70,18 @@ das duas páginas são persistidos na NVS.
 
 ## Sequência do ciclo
 
-Ao ativar RUN, o controlador primeiro faz homing até o ponto inicial. Se a
-posição atual for menor que o início, usa CW; caso contrário, usa CCW. Depois
-executa continuamente:
+Ao ativar RUN, o controlador executa o passo 0 e sua espera uma única vez.
+Depois percorre os passos 1 até N, aguardando o intervalo configurado após cada
+chegada. Ao concluir o passo N, retorna ao passo 1 e repete continuamente.
 
-1. espera no início;
-2. move para o fim incrementando graus/CW;
-3. espera no fim;
-4. retorna ao início decrementando graus/CCW.
+Todos os passos usam o mesmo formato: posição entre 0 e 359,99°, RPM, intervalo
+após a chegada e sentido. A tabela só pode ser alterada quando o ciclo, o servo
+e a atualização OTA estão parados. STOP cancela imediatamente movimento ou
+espera.
+
+Na primeira inicialização desta versão, uma configuração antiga de vai e volta
+é convertida em passo 0 mais dois passos cíclicos. A nova sequência é gravada
+como um bloco versionado na NVS ao ser salva pela interface.
 
 STOP cancela imediatamente homing, ajuste pontual ou ciclo automático e salva
 `running=off`.

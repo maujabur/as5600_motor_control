@@ -7,6 +7,7 @@
 
 #include <As5600Sensor.h>
 #include <AdrcPositionController.h>
+#include <MotionSequenceController.h>
 #include <RepetitiveMotionController.h>
 
 #include <ctype.h>
@@ -181,6 +182,7 @@ uint32_t                g_move_debug_last_print_ms = 0;
 // genericos, sem depender do AS5600 ou do controlador ADRC concreto.
 void startAutomaticPositionMove(
   float target_deg, float rpm, RepetitiveMotionController::Direction direction);
+void startSequencePositionMove(float target_deg, float rpm, MotionDirection direction);
 bool isAutomaticPositionMoveActive();
 void stopAutomaticPositionMove();
 void applyMotorOutput(int16_t signed_pwm);
@@ -192,6 +194,11 @@ RepetitiveMotionController g_repetitive_motion({
   isAutomaticPositionMoveActive,
   stopAutomaticPositionMove
 });
+MotionSequenceController g_sequence_motion({
+  startSequencePositionMove,
+  isAutomaticPositionMoveActive,
+  stopAutomaticPositionMove
+});
 
 Preferences g_repetitive_preferences;
 bool g_repetitive_preferences_ready = false;
@@ -199,6 +206,12 @@ bool g_repetitive_run_on_boot = false;
 bool g_persisted_repetitive_running = false;
 WebServer g_web_server(80);
 bool g_web_server_started = false;
+
+constexpr uint32_t SEQUENCE_STORAGE_VERSION = 1;
+struct StoredMotionSequence {
+  uint32_t version;
+  MotionSequenceConfig config;
+};
 
 void loadRepetitiveMotionPreferences() {
   g_repetitive_preferences_ready =
@@ -262,6 +275,24 @@ void loadRepetitiveMotionPreferences() {
   c.dwell_at_end_ms = min(
     g_repetitive_preferences.getULong("wait_end", c.dwell_at_end_ms), 3600000UL);
   g_repetitive_motion.setConfig(c);
+  StoredMotionSequence stored{};
+  if (g_repetitive_preferences.getBytesLength("sequence") == sizeof(stored) &&
+      g_repetitive_preferences.getBytes("sequence", &stored, sizeof(stored)) == sizeof(stored) &&
+      stored.version == SEQUENCE_STORAGE_VERSION &&
+      stored.config.step_count >= 1 &&
+      stored.config.step_count <= MOTION_SEQUENCE_MAX_STEPS) {
+    g_sequence_motion.setConfig(stored.config);
+  } else {
+    MotionSequenceConfig sequence;
+    sequence.startup_step = {c.start_deg, c.end_to_start_rpm,
+                             c.dwell_at_start_ms, MotionDirection::Shortest};
+    sequence.step_count = 2;
+    sequence.steps[0] = {c.end_deg, c.start_to_end_rpm,
+                         c.dwell_at_end_ms, MotionDirection::Clockwise};
+    sequence.steps[1] = {c.start_deg, c.end_to_start_rpm,
+                         c.dwell_at_start_ms, MotionDirection::CounterClockwise};
+    g_sequence_motion.setConfig(sequence);
+  }
   g_repetitive_run_on_boot = g_repetitive_preferences.getBool("running", false);
   g_persisted_repetitive_running = g_repetitive_run_on_boot;
 
@@ -269,13 +300,8 @@ void loadRepetitiveMotionPreferences() {
 
 void saveRepetitiveMotionConfig() {
   if (!g_repetitive_preferences_ready) return;
-  const RepetitiveMotionConfig& c = g_repetitive_motion.config();
-  g_repetitive_preferences.putFloat("start_deg", c.start_deg);
-  g_repetitive_preferences.putFloat("end_deg", c.end_deg);
-  g_repetitive_preferences.putFloat("rpm_out", c.start_to_end_rpm);
-  g_repetitive_preferences.putFloat("rpm_back", c.end_to_start_rpm);
-  g_repetitive_preferences.putULong("wait_start", c.dwell_at_start_ms);
-  g_repetitive_preferences.putULong("wait_end", c.dwell_at_end_ms);
+  StoredMotionSequence stored{SEQUENCE_STORAGE_VERSION, g_sequence_motion.config()};
+  g_repetitive_preferences.putBytes("sequence", &stored, sizeof(stored));
 }
 
 void saveAdrcSettings() {
@@ -310,7 +336,7 @@ void saveControlSettings() {
 }
 
 void setRepetitiveRunning(bool running, bool persist = true) {
-  g_repetitive_motion.setRunning(running, millis());
+  g_sequence_motion.setRunning(running, millis());
   if (persist && g_repetitive_preferences_ready &&
       running != g_persisted_repetitive_running) {
     g_repetitive_preferences.putBool("running", running);
@@ -329,7 +355,6 @@ bool parseWebNumber(const char* name, float* value) {
 }
 
 void sendWebStatus(int status_code = 200) {
-  const RepetitiveMotionConfig& c = g_repetitive_motion.config();
   float angle_deg = 0.0f;
   const bool sensor_ok = g_as5600.detected() && g_as5600.readAngleDeg(&angle_deg);
   String json;
@@ -337,20 +362,16 @@ void sendWebStatus(int status_code = 200) {
   json += F("{\"unit\":");
   json += String(MOTOR_CONTROL_UNIT_NUMBER);
   json += F(",\"running\":");
-  json += g_repetitive_motion.running() ? F("true") : F("false");
+  json += g_sequence_motion.running() ? F("true") : F("false");
   json += F(",\"moveActive\":");
   json += g_position_servo.isActive() ? F("true") : F("false");
   json += F(",\"phase\":\"");
-  json += g_repetitive_motion.phaseText();
-  json += F("\",\"sensor\":");
+  json += g_sequence_motion.phaseText();
+  json += F("\",\"step\":");
+  json += String(g_sequence_motion.currentStep());
+  json += F(",\"sensor\":");
   json += sensor_ok ? F("true") : F("false");
   json += F(",\"angle\":"); json += String(angle_deg, 2);
-  json += F(",\"start\":"); json += String(c.start_deg, 2);
-  json += F(",\"end\":"); json += String(c.end_deg, 2);
-  json += F(",\"rpmOut\":"); json += String(c.start_to_end_rpm, 2);
-  json += F(",\"rpmBack\":"); json += String(c.end_to_start_rpm, 2);
-  json += F(",\"waitStart\":"); json += String(c.dwell_at_start_ms);
-  json += F(",\"waitEnd\":"); json += String(c.dwell_at_end_ms);
   json += F(",\"maxRpm\":"); json += String(g_position_servo.settings().max_target_rpm, 2);
   json += F(",\"otaBusy\":");
   json += g_ota_update_in_progress ? F("true") : F("false");
@@ -372,7 +393,7 @@ void sendWebSettings() {
   String json;
   json.reserve(360);
   json += F("{\"canEdit\":");
-  json += (!g_repetitive_motion.running() && !g_position_servo.isActive() &&
+  json += (!g_sequence_motion.running() && !g_position_servo.isActive() &&
            !g_ota_update_in_progress) ? F("true") : F("false");
   json += F(",\"wc\":"); json += String(s.control_bandwidth, 2);
   json += F(",\"wo\":"); json += String(s.observer_bandwidth, 2);
@@ -396,6 +417,69 @@ void sendWebSettings() {
   g_web_server.send(200, "application/json", json);
 }
 
+const char* motionDirectionText(MotionDirection direction) {
+  switch (direction) {
+    case MotionDirection::Clockwise: return "cw";
+    case MotionDirection::CounterClockwise: return "ccw";
+    case MotionDirection::Shortest: return "shortest";
+  }
+  return "shortest";
+}
+
+bool parseMotionDirection(const String& text, MotionDirection* direction) {
+  if (!direction) return false;
+  if (text == "shortest") *direction = MotionDirection::Shortest;
+  else if (text == "cw") *direction = MotionDirection::Clockwise;
+  else if (text == "ccw") *direction = MotionDirection::CounterClockwise;
+  else return false;
+  return true;
+}
+
+void appendSequenceStepJson(String& json, const MotionStep& step) {
+  json += F("{\"target\":"); json += String(step.target_deg, 2);
+  json += F(",\"rpm\":"); json += String(step.rpm, 2);
+  json += F(",\"dwell\":"); json += String(step.dwell_ms);
+  json += F(",\"direction\":\""); json += motionDirectionText(step.direction);
+  json += F("\"}");
+}
+
+void sendWebSequence() {
+  const MotionSequenceConfig& config = g_sequence_motion.config();
+  String json;
+  json.reserve(1900);
+  json += F("{\"canEdit\":");
+  json += (!g_sequence_motion.running() && !g_position_servo.isActive() &&
+           !g_ota_update_in_progress) ? F("true") : F("false");
+  json += F(",\"maxRpm\":");
+  json += String(g_position_servo.settings().max_target_rpm, 2);
+  json += F(",\"startup\":");
+  appendSequenceStepJson(json, config.startup_step);
+  json += F(",\"steps\":[");
+  for (uint8_t i = 0; i < config.step_count; ++i) {
+    if (i) json += ',';
+    appendSequenceStepJson(json, config.steps[i]);
+  }
+  json += F("]}");
+  g_web_server.send(200, "application/json", json);
+}
+
+bool parseWebSequenceStep(uint8_t index, MotionStep* step) {
+  if (!step) return false;
+  const String prefix = "s" + String(index) + "_";
+  float target = 0.0f, rpm = 0.0f, dwell = 0.0f;
+  if (!parseWebNumber((prefix + "target").c_str(), &target) ||
+      !parseWebNumber((prefix + "rpm").c_str(), &rpm) ||
+      !parseWebNumber((prefix + "dwell").c_str(), &dwell) ||
+      !g_web_server.hasArg(prefix + "direction")) return false;
+  MotionDirection direction;
+  if (!parseMotionDirection(g_web_server.arg(prefix + "direction"), &direction)) return false;
+  const float max_rpm = g_position_servo.settings().max_target_rpm;
+  if (target < 0.0f || target >= 360.0f || rpm < 0.1f || rpm > max_rpm ||
+      dwell < 0.0f || dwell > 3600000.0f) return false;
+  *step = {target, rpm, (uint32_t)lroundf(dwell), direction};
+  return true;
+}
+
 void setupWebControl() {
   if (g_web_server_started) return;
 
@@ -407,7 +491,7 @@ void setupWebControl() {
   });
   g_web_server.on("/api/settings", HTTP_GET, []() { sendWebSettings(); });
   g_web_server.on("/api/settings", HTTP_POST, []() {
-    if (g_repetitive_motion.running() || g_position_servo.isActive() ||
+    if (g_sequence_motion.running() || g_position_servo.isActive() ||
         g_ota_update_in_progress) {
       sendWebError(409, "Pare o motor antes de alterar os ajustes");
       return;
@@ -482,11 +566,47 @@ void setupWebControl() {
     c.start_to_end_rpm = fminf(c.start_to_end_rpm, max_rpm);
     c.end_to_start_rpm = fminf(c.end_to_start_rpm, max_rpm);
     g_repetitive_motion.setConfig(c);
+    MotionSequenceConfig sequence = g_sequence_motion.config();
+    sequence.startup_step.rpm = fminf(sequence.startup_step.rpm, max_rpm);
+    for (uint8_t i = 0; i < sequence.step_count; ++i) {
+      sequence.steps[i].rpm = fminf(sequence.steps[i].rpm, max_rpm);
+    }
+    g_sequence_motion.setConfig(sequence);
     saveRepetitiveMotionConfig();
     saveControlSettings();
     sendWebSettings();
   });
   g_web_server.on("/api/status", HTTP_GET, []() { sendWebStatus(); });
+  g_web_server.on("/api/sequence", HTTP_GET, []() { sendWebSequence(); });
+  g_web_server.on("/api/sequence", HTTP_POST, []() {
+    if (g_sequence_motion.running() || g_position_servo.isActive() ||
+        g_ota_update_in_progress) {
+      sendWebError(409, "Pare o motor antes de alterar a sequencia");
+      return;
+    }
+    float count_value = 0.0f;
+    if (!parseWebNumber("count", &count_value) || count_value < 1.0f ||
+        count_value > MOTION_SEQUENCE_MAX_STEPS ||
+        count_value != floorf(count_value)) {
+      sendWebError(422, "Quantidade de passos invalida");
+      return;
+    }
+    MotionSequenceConfig candidate;
+    candidate.step_count = (uint8_t)count_value;
+    if (!parseWebSequenceStep(0, &candidate.startup_step)) {
+      sendWebError(422, "Passo inicial invalido");
+      return;
+    }
+    for (uint8_t i = 1; i <= candidate.step_count; ++i) {
+      if (!parseWebSequenceStep(i, &candidate.steps[i - 1])) {
+        sendWebError(422, "Passo do ciclo invalido");
+        return;
+      }
+    }
+    g_sequence_motion.setConfig(candidate);
+    saveRepetitiveMotionConfig();
+    sendWebSequence();
+  });
   g_web_server.on("/api/run", HTTP_POST, []() {
     if (!g_web_server.hasArg("running")) {
       sendWebError(400, "Parametro running ausente");
@@ -506,7 +626,7 @@ void setupWebControl() {
     sendWebStatus();
   });
   g_web_server.on("/api/adjust", HTTP_POST, []() {
-    if (g_repetitive_motion.running() || g_position_servo.isActive()) {
+    if (g_sequence_motion.running() || g_position_servo.isActive()) {
       sendWebError(409, "Ajuste permitido somente com o motor parado");
       return;
     }
@@ -538,7 +658,7 @@ void setupWebControl() {
     sendWebStatus();
   });
   g_web_server.on("/api/manual-move", HTTP_POST, []() {
-    if (g_repetitive_motion.running() || g_position_servo.isActive() ||
+    if (g_sequence_motion.running() || g_position_servo.isActive() ||
         g_ota_update_in_progress) {
       sendWebError(409, "Movimento avulso permitido somente com o motor parado");
       return;
@@ -948,7 +1068,7 @@ void applyBrakeOutput() {
 }
 
 void stopMotorForOta() {
-  g_repetitive_motion.stop();
+  g_sequence_motion.stop();
   g_move_tracking_active = false;
   g_state.target_percent = 0.0f;
   g_state.current_percent = 0.0f;
@@ -1086,6 +1206,29 @@ void startAutomaticPositionMove(
       : AdrcPositionController::MoveDirection::CounterClockwise;
   }
   g_position_servo.startMove(target_deg, limited_rpm, adrc_direction);
+  g_position_servo.primeAccumulatedAngle(current_deg);
+  g_move_done_reported = false;
+  g_move_start_ms = millis();
+}
+
+void startSequencePositionMove(float target_deg, float rpm,
+                               MotionDirection direction) {
+  float current_deg = 0.0f;
+  if (!g_as5600.detected() || !g_as5600.readAngleDeg(&current_deg)) {
+    setRepetitiveRunning(false);
+    Serial.println("ERRO: sequencia parada; falha ao ler AS5600");
+    return;
+  }
+  AdrcPositionController::MoveDirection servo_direction =
+    AdrcPositionController::MoveDirection::Shortest;
+  if (direction == MotionDirection::Clockwise) {
+    servo_direction = AdrcPositionController::MoveDirection::Clockwise;
+  } else if (direction == MotionDirection::CounterClockwise) {
+    servo_direction = AdrcPositionController::MoveDirection::CounterClockwise;
+  }
+  const float limited_rpm = clampf(
+    rpm, 0.1f, g_position_servo.settings().max_target_rpm);
+  g_position_servo.startMove(target_deg, limited_rpm, servo_direction);
   g_position_servo.primeAccumulatedAngle(current_deg);
   g_move_done_reported = false;
   g_move_start_ms = millis();
@@ -1277,8 +1420,8 @@ void printStatus() {
   Serial.printf("Move default: %.2f rpm\n", g_default_move_max_rpm);
   const RepetitiveMotionConfig& cycle = g_repetitive_motion.config();
   Serial.printf("Ciclo: running=%s  fase=%s\n",
-                g_repetitive_motion.running() ? "ON" : "OFF",
-                g_repetitive_motion.phaseText());
+                g_sequence_motion.running() ? "ON" : "OFF",
+                g_sequence_motion.phaseText());
   Serial.printf("  inicio=%.2f deg  fim=%.2f deg  rpm ida=%.2f  rpm volta=%.2f\n",
                 cycle.start_deg, cycle.end_deg,
                 cycle.start_to_end_rpm, cycle.end_to_start_rpm);
@@ -1432,8 +1575,8 @@ void parseAndHandleCommand(char* line) {
     char* val = nextArg();
     if (!val) {
       Serial.printf("OK: running=%s  fase=%s\n",
-                    g_repetitive_motion.running() ? "on" : "off",
-                    g_repetitive_motion.phaseText());
+                    g_sequence_motion.running() ? "on" : "off",
+                    g_sequence_motion.phaseText());
       return;
     }
     if (!strcmp(val,"on") || !strcmp(val,"1") || !strcmp(val,"true")) {
@@ -1442,7 +1585,7 @@ void parseAndHandleCommand(char* line) {
         return;
       }
       setRepetitiveRunning(true);
-      Serial.printf("OK: running=%s\n", g_repetitive_motion.running() ? "on" : "off");
+      Serial.printf("OK: running=%s\n", g_sequence_motion.running() ? "on" : "off");
     } else if (!strcmp(val,"off") || !strcmp(val,"0") || !strcmp(val,"false")) {
       setRepetitiveRunning(false);
       Serial.println("OK: running=off; motor parado");
@@ -1541,7 +1684,7 @@ void parseAndHandleCommand(char* line) {
       Serial.printf("OK: ADRC %s=%.3f\n", name, *setting);
       return;
     }
-    if (g_position_servo.isActive() || g_repetitive_motion.running()) {
+    if (g_position_servo.isActive() || g_sequence_motion.running()) {
       printErrorAndPrompt("ERRO: pare o motor antes de alterar ADRC");
       return;
     }
@@ -2351,7 +2494,7 @@ void loop() {
 
   // Mantem a serial exclusivamente para logs; qualquer entrada e descartada.
   while (Serial.available() > 0) Serial.read();
-  g_repetitive_motion.update(millis());
+  g_sequence_motion.update(millis());
   updatePositionMoveControl();
   updateRampControl();
 

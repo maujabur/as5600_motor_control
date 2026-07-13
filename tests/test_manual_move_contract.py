@@ -19,7 +19,7 @@ class ManualMoveContractTest(unittest.TestCase):
         self.assertIn(marker, MAIN)
         endpoint = MAIN.split(marker, 1)[1]
         endpoint = endpoint.split('g_web_server.on(', 1)[0]
-        self.assertIn('g_repetitive_motion.running()', endpoint)
+        self.assertIn('g_sequence_motion.running()', endpoint)
         self.assertIn('g_position_servo.isActive()', endpoint)
         self.assertIn('g_ota_update_in_progress', endpoint)
 
