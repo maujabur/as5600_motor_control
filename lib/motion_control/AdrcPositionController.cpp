@@ -75,6 +75,11 @@ void AdrcPositionController::primeAccumulatedAngle(float current_deg) {
 
 void AdrcPositionController::resumeAtAngle(float current_deg, uint32_t now_ms) {
   if (!active_) return;
+  const float normalized = normalize360(current_deg);
+  current_accumulated_deg_ +=
+    shortestDelta(last_current_deg_normalized_, normalized);
+  last_current_deg_normalized_ = normalized;
+  accumulated_initialized_ = true;
   kicking_ = false;
   stalled_ = false;
   samples_in_window_ = 0;
@@ -85,7 +90,8 @@ void AdrcPositionController::resumeAtAngle(float current_deg, uint32_t now_ms) {
   last_output_pwm_ = 0.0f;
   last_pwm_output_percent_ = 0;
   velocity_estimator_.reset();
-  primeAccumulatedAngle(current_deg);
+  profiled_target_deg_ = current_accumulated_deg_;
+  resetObserver(current_accumulated_deg_, now_ms);
   move_started_ms_ = now_ms;
   last_compute_ms_ = now_ms;
 }

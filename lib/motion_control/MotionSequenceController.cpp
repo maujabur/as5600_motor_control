@@ -59,6 +59,11 @@ void MotionSequenceController::update(uint32_t now_ms) {
   if (next_step_index_ > config_.step_count) next_step_index_ = 1;
 }
 
+void MotionSequenceController::resumeAfterPause(uint32_t paused_ms) {
+  if (!running_) return;
+  phase_started_ms_ += paused_ms;
+}
+
 const char* MotionSequenceController::phaseText() const {
   switch (phase_) {
     case Phase::MOVING: return "MOVING";

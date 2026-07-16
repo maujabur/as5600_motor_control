@@ -149,6 +149,8 @@ size_t g_serial_index = 0;
 AngleSensorManager g_angle_sensor;
 AdrcPositionController   g_position_servo;
 bool                     g_sensor_pause_active = false;
+bool                     g_sensor_loss_active = false;
+uint32_t                 g_sensor_loss_started_ms = 0;
 bool                     g_run_when_sensor_detected = false;
 bool                    g_move_done_reported = false;
 bool                    g_adrc_stall_fault = false;
@@ -188,6 +190,8 @@ void startSequencePositionMove(float target_deg, float rpm, MotionDirection dire
 bool isAutomaticPositionMoveActive();
 void stopAutomaticPositionMove();
 void applyMotorOutput(int16_t signed_pwm);
+void forceMotorSafeForSensorLoss();
+bool readAngleSensorDeg(float* angle_deg);
 float clampf(float v, float lo, float hi);
 bool setPwmFrequencyHz(uint32_t hz);
 
@@ -359,7 +363,7 @@ bool parseWebNumber(const char* name, float* value) {
 void sendWebStatus(int status_code = 200) {
   float angle_deg = 0.0f;
   const bool sensor_ok = g_angle_sensor.active() &&
-                         g_angle_sensor.readAngleDeg(&angle_deg);
+                         readAngleSensorDeg(&angle_deg);
   String json;
   json.reserve(320);
   json += F("{\"unit\":");
@@ -686,7 +690,7 @@ void setupWebControl() {
     }
 
     float current_deg = 0.0f;
-    if (!g_angle_sensor.readAngleDeg(&current_deg)) {
+    if (!readAngleSensorDeg(&current_deg)) {
       sendWebError(503, "Falha ao ler sensor angular");
       return;
     }
@@ -802,14 +806,32 @@ bool setPwmFrequencyHz(uint32_t hz) {
   return true;
 }
 
+void forceMotorSafeForSensorLoss() {
+  if (!g_sensor_loss_active) {
+    g_sensor_loss_started_ms = millis();
+  }
+  g_sensor_loss_active = true;
+  if (g_position_servo.isActive()) {
+    g_sensor_pause_active = true;
+  }
+  g_state.target_percent = 0.0f;
+  g_state.current_percent = 0.0f;
+  g_state.drive_phase = DrivePhase::IDLE;
+  applyMotorOutput(0);
+}
+
+bool readAngleSensorDeg(float* angle_deg) {
+  const bool read_ok = g_angle_sensor.readAngleDeg(angle_deg);
+  if (!read_ok && !g_angle_sensor.active()) {
+    forceMotorSafeForSensorLoss();
+  }
+  return read_ok;
+}
+
 void updateAngleSensorRecovery(uint32_t now_ms) {
   g_angle_sensor.update(now_ms);
   if (g_angle_sensor.consumeLostEvent()) {
-    g_sensor_pause_active = g_position_servo.isActive();
-    g_state.target_percent = 0.0f;
-    g_state.current_percent = 0.0f;
-    g_state.drive_phase = DrivePhase::IDLE;
-    applyMotorOutput(0);
+    forceMotorSafeForSensorLoss();
     Serial.printf("Sensor angular perdido apos %u falhas; PWM bloqueado\n",
                   g_angle_sensor.failureLimit());
   }
@@ -818,6 +840,9 @@ void updateAngleSensorRecovery(uint32_t now_ms) {
   if (g_angle_sensor.consumeRecoveredEvent(&recovered_angle_deg)) {
     Serial.printf("%s reconectado em 0x%02X\n",
                   g_angle_sensor.sensorName(), g_angle_sensor.sensorAddress());
+    if (g_sensor_loss_active) {
+      g_sequence_motion.resumeAfterPause(now_ms - g_sensor_loss_started_ms);
+    }
     if (g_sensor_pause_active && g_position_servo.isActive() &&
         !g_ota_update_in_progress) {
       g_position_servo.resumeAtAngle(recovered_angle_deg, now_ms);
@@ -826,6 +851,7 @@ void updateAngleSensorRecovery(uint32_t now_ms) {
       g_move_rpm_window_dt_ms = 0;
     }
     g_sensor_pause_active = false;
+    g_sensor_loss_active = false;
   }
 
   if (g_run_when_sensor_detected && g_angle_sensor.active() &&
@@ -883,7 +909,7 @@ void updatePositionMoveControl() {
   }
 
   float current_deg = 0.0f;
-  if (!g_angle_sensor.readAngleDeg(&current_deg)) return;
+  if (!readAngleSensorDeg(&current_deg)) return;
 
   const uint32_t now_ms = millis();
 
@@ -1103,6 +1129,7 @@ void applyBrakeOutput() {
 void stopMotorForOta() {
   g_sequence_motion.stop();
   g_sensor_pause_active = false;
+  g_sensor_loss_active = false;
   g_run_when_sensor_detected = false;
   g_move_tracking_active = false;
   g_state.target_percent = 0.0f;
@@ -1223,7 +1250,7 @@ bool setupStationOrAccessPoint() {
 void startAutomaticPositionMove(
     float target_deg, float rpm, RepetitiveMotionController::Direction direction) {
   float current_deg = 0.0f;
-  if (!g_angle_sensor.active() || !g_angle_sensor.readAngleDeg(&current_deg)) {
+  if (!g_angle_sensor.active() || !readAngleSensorDeg(&current_deg)) {
     setRepetitiveRunning(false);
     Serial.println("ERRO: ciclo automatico parado; falha ao ler sensor angular");
     return;
@@ -1249,7 +1276,7 @@ void startAutomaticPositionMove(
 void startSequencePositionMove(float target_deg, float rpm,
                                MotionDirection direction) {
   float current_deg = 0.0f;
-  if (!g_angle_sensor.active() || !g_angle_sensor.readAngleDeg(&current_deg)) {
+  if (!g_angle_sensor.active() || !readAngleSensorDeg(&current_deg)) {
     setRepetitiveRunning(false);
     Serial.println("ERRO: sequencia parada; falha ao ler sensor angular");
     return;
@@ -1276,6 +1303,7 @@ bool isAutomaticPositionMoveActive() {
 void stopAutomaticPositionMove() {
   g_position_servo.cancel();
   g_sensor_pause_active = false;
+  g_sensor_loss_active = false;
   g_run_when_sensor_detected = false;
   g_state.target_percent = 0.0f;
   g_state.current_percent = 0.0f;
@@ -1777,7 +1805,7 @@ void parseAndHandleCommand(char* line) {
     vmax_rpm = clampf(vmax_rpm, 0.0f, s.max_target_rpm);
 
     float current_deg = 0.0f;
-    if (!g_angle_sensor.readAngleDeg(&current_deg)) {
+    if (!readAngleSensorDeg(&current_deg)) {
       printErrorAndPrompt("ERRO: falha ao ler sensor angular");
       return;
     }
@@ -1820,7 +1848,7 @@ void parseAndHandleCommand(char* line) {
     vmax_rpm = clampf(vmax_rpm, 0.0f, s.max_target_rpm);
 
     float current_deg = 0.0f;
-    if (!g_angle_sensor.readAngleDeg(&current_deg)) {
+    if (!readAngleSensorDeg(&current_deg)) {
       printErrorAndPrompt("ERRO: falha ao ler sensor angular");
       return;
     }
@@ -1869,7 +1897,7 @@ void parseAndHandleCommand(char* line) {
     vmax_rpm = clampf(vmax_rpm, 0.0f, s.max_target_rpm);
 
     float current_deg = 0.0f;
-    if (!g_angle_sensor.readAngleDeg(&current_deg)) {
+    if (!readAngleSensorDeg(&current_deg)) {
       printErrorAndPrompt("ERRO: falha ao ler sensor angular");
       return;
     }
@@ -2545,7 +2573,9 @@ void loop() {
   while (Serial.available() > 0) Serial.read();
   const uint32_t now_ms = millis();
   updateAngleSensorRecovery(now_ms);
-  g_sequence_motion.update(now_ms);
+  if (!g_sensor_loss_active) {
+    g_sequence_motion.update(now_ms);
+  }
   updatePositionMoveControl();
   updateRampControl();
 
