@@ -110,6 +110,36 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
             self.assertIn("return", lost_branch)
             self.assertIn("setRepetitiveRunning(false)", failed_read)
 
+    def test_pending_numeric_direction_is_resolved_only_before_prime(self):
+        main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
+        self.assertIn("g_pending_numeric_direction", main)
+        automatic = main.rsplit("void startAutomaticPositionMove", 1)[1]
+        automatic = automatic.split("\nvoid ", 1)[0]
+        lost = automatic.split("if (!g_angle_sensor.active())", 1)[1]
+        lost = lost.split("return", 1)[0]
+        self.assertIn("Direction::ByNumericComparison", lost)
+        self.assertIn("g_pending_numeric_direction = true", lost)
+
+        recovery = main.split("consumeRecoveredEvent(&recovered_angle_deg)", 1)[1]
+        recovery = recovery.split("g_position_servo.resumeAtAngle", 1)[0]
+        self.assertIn("g_pending_numeric_direction", recovery)
+        self.assertIn("recovered_angle_deg < g_position_servo.targetDeg()", recovery)
+        self.assertIn("setPendingDirection", recovery)
+        self.assertIn("MoveDirection::Clockwise", recovery)
+        self.assertIn("MoveDirection::CounterClockwise", recovery)
+
+        for cancel_name in ("stopMotorForOta", "stopAutomaticPositionMove"):
+            cancel = main.rsplit(f"void {cancel_name}", 1)[1]
+            cancel = cancel.split("\nvoid ", 1)[0]
+            self.assertIn("g_pending_numeric_direction = false", cancel)
+
+        self.assertIn("setPendingDirection(MoveDirection direction)", ADRC_H)
+        setter = ADRC_CPP.split(
+            "bool AdrcPositionController::setPendingDirection", 1)[1]
+        setter = setter.split("void AdrcPositionController::", 1)[0]
+        self.assertIn("!active_ || accumulated_initialized_", setter)
+        self.assertIn("direction_ = direction", setter)
+
 
 if __name__ == "__main__":
     unittest.main()

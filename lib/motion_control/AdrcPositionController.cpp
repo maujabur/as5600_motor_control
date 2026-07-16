@@ -33,6 +33,12 @@ void AdrcPositionController::startMove(float target_deg, float max_speed_rpm,
   velocity_estimator_.reset();
 }
 
+bool AdrcPositionController::setPendingDirection(MoveDirection direction) {
+  if (!active_ || accumulated_initialized_) return false;
+  direction_ = direction;
+  return true;
+}
+
 void AdrcPositionController::cancel() {
   active_ = false;
   kicking_ = false;

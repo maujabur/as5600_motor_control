@@ -151,6 +151,7 @@ AdrcPositionController   g_position_servo;
 bool                     g_sensor_pause_active = false;
 bool                     g_sensor_loss_active = false;
 uint32_t                 g_sensor_loss_started_ms = 0;
+bool                     g_pending_numeric_direction = false;
 bool                     g_run_when_sensor_detected = false;
 bool                    g_move_done_reported = false;
 bool                    g_adrc_stall_fault = false;
@@ -845,6 +846,14 @@ void updateAngleSensorRecovery(uint32_t now_ms) {
     }
     if (g_sensor_pause_active && g_position_servo.isActive() &&
         !g_ota_update_in_progress) {
+      if (g_pending_numeric_direction) {
+        const AdrcPositionController::MoveDirection recovered_direction =
+          recovered_angle_deg < g_position_servo.targetDeg()
+            ? AdrcPositionController::MoveDirection::Clockwise
+            : AdrcPositionController::MoveDirection::CounterClockwise;
+        g_position_servo.setPendingDirection(recovered_direction);
+        g_pending_numeric_direction = false;
+      }
       g_position_servo.resumeAtAngle(recovered_angle_deg, now_ms);
       g_move_prev_sample_valid = false;
       g_move_rpm_window_delta_deg = 0.0f;
@@ -1128,6 +1137,7 @@ void applyBrakeOutput() {
 
 void stopMotorForOta() {
   g_sequence_motion.stop();
+  g_pending_numeric_direction = false;
   g_sensor_pause_active = false;
   g_sensor_loss_active = false;
   g_run_when_sensor_detected = false;
@@ -1249,6 +1259,7 @@ bool setupStationOrAccessPoint() {
 
 void startAutomaticPositionMove(
     float target_deg, float rpm, RepetitiveMotionController::Direction direction) {
+  g_pending_numeric_direction = false;
   const float limited_rpm = clampf(rpm, 0.1f, g_position_servo.settings().max_target_rpm);
   AdrcPositionController::MoveDirection adrc_direction =
     direction == RepetitiveMotionController::Direction::Increasing
@@ -1261,6 +1272,9 @@ void startAutomaticPositionMove(
   float current_deg = 0.0f;
   if (!g_angle_sensor.active() || !readAngleSensorDeg(&current_deg)) {
     if (!g_angle_sensor.active()) {
+      if (direction == RepetitiveMotionController::Direction::ByNumericComparison) {
+        g_pending_numeric_direction = true;
+      }
       forceMotorSafeForSensorLoss();
       Serial.println("Sensor perdido ao iniciar movimento automatico; passo aguardando recuperacao");
       return;
@@ -1283,6 +1297,7 @@ void startAutomaticPositionMove(
 
 void startSequencePositionMove(float target_deg, float rpm,
                                MotionDirection direction) {
+  g_pending_numeric_direction = false;
   AdrcPositionController::MoveDirection servo_direction =
     AdrcPositionController::MoveDirection::Shortest;
   if (direction == MotionDirection::Clockwise) {
@@ -1316,6 +1331,7 @@ bool isAutomaticPositionMoveActive() {
 
 void stopAutomaticPositionMove() {
   g_position_servo.cancel();
+  g_pending_numeric_direction = false;
   g_sensor_pause_active = false;
   g_sensor_loss_active = false;
   g_run_when_sensor_detected = false;
