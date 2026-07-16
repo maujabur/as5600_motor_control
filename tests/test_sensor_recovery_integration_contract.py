@@ -140,6 +140,28 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
         self.assertIn("!active_ || accumulated_initialized_", setter)
         self.assertIn("direction_ = direction", setter)
 
+    def test_failure_limit_is_persisted_and_validated(self):
+        main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
+        page = (ROOT / "src/control_settings_web_page.h").read_text(encoding="utf-8")
+        for token in ('getUInt("sensor_fail"', 'putUInt("sensor_fail"',
+                      'parseWebNumber("sensorFailures"',
+                      "setFailureLimit((uint8_t)lroundf(sensor_failures))"):
+            self.assertIn(token, main)
+        self.assertIn('id="sensorFailures"', page)
+        self.assertIn("'sensorFailures'", page)
+
+    def test_status_api_exposes_sensor_identity_and_state(self):
+        main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
+        for field in ('"sensorType"', '"sensorAddress"', '"sensorState"',
+                      '"sensorFailures"'):
+            self.assertIn(field, main)
+
+    def test_main_page_distinguishes_detection_and_reconnection(self):
+        page = (ROOT / "src/repetitive_motion_web_page.h").read_text(encoding="utf-8")
+        self.assertIn("DETECTANDO SENSOR", page)
+        self.assertIn("RECONECTANDO SENSOR", page)
+        self.assertIn("sensorState", page)
+
 
 if __name__ == "__main__":
     unittest.main()

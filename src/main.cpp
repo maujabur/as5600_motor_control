@@ -268,6 +268,8 @@ void loadRepetitiveMotionPreferences() {
   g_pwm_frequency_hz = constrain(
     g_repetitive_preferences.getUInt("pwm_hz", g_pwm_frequency_hz),
     PWM_MIN_FREQUENCY_HZ, PWM_MAX_FREQUENCY_HZ);
+  g_angle_sensor.setFailureLimit((uint8_t)constrain(
+    g_repetitive_preferences.getUInt("sensor_fail", 3), 1U, 20U));
 
   RepetitiveMotionConfig c = g_repetitive_motion.config();
   c.start_deg = g_repetitive_preferences.getFloat("start_deg", c.start_deg);
@@ -340,6 +342,7 @@ void saveControlSettings() {
   g_repetitive_preferences.putUInt("vel_samples", s.velocity_num_samples);
   g_repetitive_preferences.putUInt("power_limit", g_state.power_limit_percent);
   g_repetitive_preferences.putUInt("pwm_hz", g_pwm_frequency_hz);
+  g_repetitive_preferences.putUInt("sensor_fail", g_angle_sensor.failureLimit());
 }
 
 void setRepetitiveRunning(bool running, bool persist = true) {
@@ -361,12 +364,21 @@ bool parseWebNumber(const char* name, float* value) {
   return true;
 }
 
+const char* angleSensorStateText(AngleSensorManager::State state) {
+  switch (state) {
+    case AngleSensorManager::State::Active: return "ACTIVE";
+    case AngleSensorManager::State::Lost: return "LOST";
+    case AngleSensorManager::State::Detecting: return "DETECTING";
+  }
+  return "DETECTING";
+}
+
 void sendWebStatus(int status_code = 200) {
   float angle_deg = 0.0f;
   const bool sensor_ok = g_angle_sensor.active() &&
                          readAngleSensorDeg(&angle_deg);
   String json;
-  json.reserve(320);
+  json.reserve(420);
   json += F("{\"unit\":");
   json += String(MOTOR_CONTROL_UNIT_NUMBER);
   json += F(",\"running\":");
@@ -379,6 +391,14 @@ void sendWebStatus(int status_code = 200) {
   json += String(g_sequence_motion.currentStep());
   json += F(",\"sensor\":");
   json += sensor_ok ? F("true") : F("false");
+  json += F(R"json(,"sensorType":")json");
+  json += g_angle_sensor.sensorName();
+  json += F(R"json(","sensorAddress":)json");
+  json += String(g_angle_sensor.sensorAddress());
+  json += F(R"json(,"sensorState":")json");
+  json += angleSensorStateText(g_angle_sensor.state());
+  json += F(R"json(","sensorFailures":)json");
+  json += String(g_angle_sensor.failureCount());
   json += F(",\"angle\":"); json += String(angle_deg, 2);
   json += F(",\"maxRpm\":"); json += String(g_position_servo.settings().max_target_rpm, 2);
   json += F(",\"otaBusy\":");
@@ -421,6 +441,7 @@ void sendWebSettings() {
   json += F(",\"stallVel\":"); json += String(s.stall_velocity_deg_s, 2);
   json += F(",\"velWindow\":"); json += String(s.velocity_window_ms);
   json += F(",\"velSamples\":"); json += String(s.velocity_num_samples);
+  json += F(",\"sensorFailures\":"); json += String(g_angle_sensor.failureLimit());
   json += '}';
   g_web_server.send(200, "application/json", json);
 }
@@ -506,7 +527,7 @@ void setupWebControl() {
     }
     float wc, wo, b0, max_rpm, phys_rpm, power_limit, pwm_hz;
     float stop_window, stop_samples, accel_ms, decel_ms, kick_pct, kick_ms;
-    float min_pwm, stall_ms, stall_vel, vel_window, vel_samples;
+    float min_pwm, stall_ms, stall_vel, vel_window, vel_samples, sensor_failures;
     if (!parseWebNumber("wc", &wc) || !parseWebNumber("wo", &wo) ||
         !parseWebNumber("b0", &b0) || !parseWebNumber("maxRpm", &max_rpm) ||
         !parseWebNumber("physRpm", &phys_rpm) ||
@@ -522,7 +543,8 @@ void setupWebControl() {
         !parseWebNumber("stallMs", &stall_ms) ||
         !parseWebNumber("stallVel", &stall_vel) ||
         !parseWebNumber("velWindow", &vel_window) ||
-        !parseWebNumber("velSamples", &vel_samples)) {
+        !parseWebNumber("velSamples", &vel_samples) ||
+        !parseWebNumber("sensorFailures", &sensor_failures)) {
       sendWebError(400, "Parametros invalidos ou incompletos");
       return;
     }
@@ -541,7 +563,9 @@ void setupWebControl() {
         stall_ms < 100.0f || stall_ms > 10000.0f ||
         stall_vel < 0.1f || stall_vel > 20.0f ||
         vel_window < 20.0f || vel_window > 1000.0f ||
-        vel_samples < 2.0f || vel_samples > 20.0f) {
+        vel_samples < 2.0f || vel_samples > 20.0f ||
+        sensor_failures < 1.0f || sensor_failures > 20.0f ||
+        sensor_failures != floorf(sensor_failures)) {
       sendWebError(422, "Valor fora da faixa ou RPM maxima acima da RPM fisica");
       return;
     }
@@ -564,6 +588,7 @@ void setupWebControl() {
     s.velocity_window_ms = (uint16_t)lroundf(vel_window);
     s.velocity_num_samples = (uint8_t)lroundf(vel_samples);
     g_position_servo.setSettings(s);
+    g_angle_sensor.setFailureLimit((uint8_t)lroundf(sensor_failures));
     g_state.power_limit_percent = (uint8_t)lroundf(power_limit);
     if (!setPwmFrequencyHz((uint32_t)lroundf(pwm_hz))) {
       sendWebError(500, "Falha ao aplicar frequencia PWM");
