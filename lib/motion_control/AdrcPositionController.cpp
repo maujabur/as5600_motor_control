@@ -73,6 +73,23 @@ void AdrcPositionController::primeAccumulatedAngle(float current_deg) {
   resetObserver(current_accumulated_deg_, millis());
 }
 
+void AdrcPositionController::resumeAtAngle(float current_deg, uint32_t now_ms) {
+  if (!active_) return;
+  kicking_ = false;
+  stalled_ = false;
+  samples_in_window_ = 0;
+  stall_started_ms_ = 0;
+  commanded_rpm_ = 0.0f;
+  profile_velocity_deg_s_ = 0.0f;
+  last_error_pos_deg_ = 0.0f;
+  last_output_pwm_ = 0.0f;
+  last_pwm_output_percent_ = 0;
+  velocity_estimator_.reset();
+  primeAccumulatedAngle(current_deg);
+  move_started_ms_ = now_ms;
+  last_compute_ms_ = now_ms;
+}
+
 void AdrcPositionController::resetObserver(float position_deg, uint32_t now_ms) {
   z1_ = position_deg;
   z2_ = 0.0f;

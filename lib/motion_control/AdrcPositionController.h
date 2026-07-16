@@ -39,6 +39,7 @@ class AdrcPositionController {
                  MoveDirection direction = MoveDirection::Shortest);
   void cancel();
   void primeAccumulatedAngle(float current_deg);
+  void resumeAtAngle(float current_deg, uint32_t now_ms);
   float computeOutputPercent(float current_deg, uint32_t now_ms);
 
   bool isActive() const { return active_; }
