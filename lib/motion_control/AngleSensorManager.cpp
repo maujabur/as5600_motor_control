@@ -11,7 +11,7 @@ bool AngleSensorManager::begin(TwoWire& wire, uint8_t sda_pin, uint8_t scl_pin,
 
 void AngleSensorManager::update(uint32_t now_ms) {
   if (!active() &&
-      (uint32_t)(now_ms - last_detect_attempt_ms_) >= 1000) {
+      (uint32_t)(now_ms - last_detect_attempt_ms_) >= REDETECT_INTERVAL_MS) {
     detect(now_ms);
   }
 }

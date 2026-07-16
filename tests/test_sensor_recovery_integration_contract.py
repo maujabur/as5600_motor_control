@@ -95,8 +95,11 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
                       "g_state.target_percent = 0.0f", "applyMotorOutput(0)"):
             self.assertIn(token, helper)
 
-    def test_step_start_loss_keeps_automatic_move_active_and_pending(self):
+    def test_transient_step_start_failure_keeps_move_and_sequence_pending(self):
         main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
+        manager = (ROOT / "lib/motion_control/AngleSensorManager.h").read_text(
+            encoding="utf-8")
+        self.assertIn("failure_limit_ = 3", manager)
         for function_name in ("startSequencePositionMove",
                               "startAutomaticPositionMove"):
             body = main.rsplit(f"void {function_name}", 1)[1]
@@ -104,29 +107,37 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
             self.assertLess(body.index("g_position_servo.startMove"),
                             body.index("readAngleSensorDeg(&current_deg)"))
             failed_read = body.split("readAngleSensorDeg(&current_deg)", 1)[1]
-            lost_branch = failed_read.split("setRepetitiveRunning(false)", 1)[0]
-            self.assertIn("if (!g_angle_sensor.active())", lost_branch)
-            self.assertIn("forceMotorSafeForSensorLoss()", lost_branch)
-            self.assertIn("return", lost_branch)
-            self.assertIn("setRepetitiveRunning(false)", failed_read)
+            self.assertIn("if (!g_angle_sensor.active())", failed_read)
+            self.assertIn("forceMotorSafeForSensorLoss()", failed_read)
+            self.assertIn("return", failed_read)
+            self.assertNotIn("setRepetitiveRunning(false)", failed_read)
+
+        automatic = main.rsplit("void startAutomaticPositionMove", 1)[1]
+        automatic = automatic.split("\nvoid ", 1)[0]
+        before_read = automatic.split("readAngleSensorDeg(&current_deg)", 1)[0]
+        self.assertIn("Direction::ByNumericComparison", before_read)
+        self.assertIn("g_pending_numeric_direction =", before_read)
 
     def test_pending_numeric_direction_is_resolved_only_before_prime(self):
         main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
         self.assertIn("g_pending_numeric_direction", main)
         automatic = main.rsplit("void startAutomaticPositionMove", 1)[1]
         automatic = automatic.split("\nvoid ", 1)[0]
-        lost = automatic.split("if (!g_angle_sensor.active())", 1)[1]
-        lost = lost.split("return", 1)[0]
-        self.assertIn("Direction::ByNumericComparison", lost)
-        self.assertIn("g_pending_numeric_direction = true", lost)
+        successful_start = automatic.split("readAngleSensorDeg(&current_deg)", 1)[1]
+        self.assertIn("resolvePendingNumericDirection(current_deg)", successful_start)
+        self.assertLess(successful_start.index("resolvePendingNumericDirection(current_deg)"),
+                        successful_start.index("primeAccumulatedAngle(current_deg)"))
+
+        position = main.split("void updatePositionMoveControl()", 1)[1]
+        position = position.split("void updateRampControl()", 1)[0]
+        valid_read = position.split("if (!readAngleSensorDeg(&current_deg))", 1)[1]
+        self.assertIn("resolvePendingNumericDirection(current_deg)", valid_read)
+        self.assertLess(valid_read.index("resolvePendingNumericDirection(current_deg)"),
+                        valid_read.index("computeOutputPercent(current_deg"))
 
         recovery = main.split("consumeRecoveredEvent(&recovered_angle_deg)", 1)[1]
         recovery = recovery.split("g_position_servo.resumeAtAngle", 1)[0]
-        self.assertIn("g_pending_numeric_direction", recovery)
-        self.assertIn("recovered_angle_deg < g_position_servo.targetDeg()", recovery)
-        self.assertIn("setPendingDirection", recovery)
-        self.assertIn("MoveDirection::Clockwise", recovery)
-        self.assertIn("MoveDirection::CounterClockwise", recovery)
+        self.assertIn("resolvePendingNumericDirection(recovered_angle_deg)", recovery)
 
         for cancel_name in ("stopMotorForOta", "stopAutomaticPositionMove"):
             cancel = main.rsplit(f"void {cancel_name}", 1)[1]
@@ -160,7 +171,16 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
         page = (ROOT / "src/repetitive_motion_web_page.h").read_text(encoding="utf-8")
         self.assertIn("DETECTANDO SENSOR", page)
         self.assertIn("RECONECTANDO SENSOR", page)
+        self.assertIn("LEITURA INDISPONIVEL", page)
         self.assertIn("sensorState", page)
+
+    def test_late_detection_logs_sensor_identity(self):
+        main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
+        recovery = main.split("void updateAngleSensorRecovery", 1)[1]
+        recovery = recovery.split("void updatePositionMoveControl", 1)[0]
+        self.assertIn("AngleSensorManager::State::Detecting", recovery)
+        self.assertIn("g_angle_sensor.sensorName()", recovery)
+        self.assertIn("g_angle_sensor.sensorAddress()", recovery)
 
 
 if __name__ == "__main__":

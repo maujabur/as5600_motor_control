@@ -22,7 +22,8 @@ class AngleSensorManagerContractTest(unittest.TestCase):
                       "Mt6701Sensor::DEFAULT_I2C_ADDR",
                       "Mt6701Sensor::ALTERNATE_I2C_ADDR")]
         self.assertEqual(positions, sorted(positions))
-        self.assertIn("1000", source)
+        self.assertIn("REDETECT_INTERVAL_MS", source)
+        self.assertNotIn(">= 1000", source)
 
     def test_consecutive_failures_drive_lost_state(self):
         source = SOURCE.read_text(encoding="utf-8")
