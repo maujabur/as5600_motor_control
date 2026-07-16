@@ -14,16 +14,22 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
         self.assertIn("resumeAtAngle(float current_deg, uint32_t now_ms)", ADRC_H)
         body = ADRC_CPP.split("void AdrcPositionController::resumeAtAngle", 1)[1]
         body = body.split("void AdrcPositionController::", 1)[0]
-        for token in ("if (!active_)", "normalize360(current_deg)",
+        for token in ("if (!active_)", "if (!accumulated_initialized_)",
+                      "primeAccumulatedAngle(current_deg)",
+                      "normalize360(current_deg)",
                       "shortestDelta(last_current_deg_normalized_, normalized)",
                       "profiled_target_deg_ = current_accumulated_deg_",
                       "resetObserver(current_accumulated_deg_, now_ms)",
                       "velocity_estimator_.reset()", "stall_started_ms_ = 0",
                       "profile_velocity_deg_s_ = 0.0f", "last_output_pwm_ = 0.0f"):
             self.assertIn(token, body)
-        self.assertNotIn("primeAccumulatedAngle", body)
-        self.assertNotIn("target_accumulated_deg_ =", body)
+        initialized_branch = body.split("else", 1)[1]
+        self.assertNotIn("target_accumulated_deg_ =", initialized_branch)
         self.assertNotIn("active_ = false", body)
+
+        start = ADRC_CPP.split("void AdrcPositionController::startMove", 1)[1]
+        start = start.split("void AdrcPositionController::", 1)[0]
+        self.assertIn("accumulated_initialized_ = false", start)
 
     def test_main_uses_generic_manager_and_no_as5600_global(self):
         main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
@@ -88,6 +94,21 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
         for token in ("g_sensor_pause_active", "g_sensor_loss_active = true",
                       "g_state.target_percent = 0.0f", "applyMotorOutput(0)"):
             self.assertIn(token, helper)
+
+    def test_step_start_loss_keeps_automatic_move_active_and_pending(self):
+        main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
+        for function_name in ("startSequencePositionMove",
+                              "startAutomaticPositionMove"):
+            body = main.rsplit(f"void {function_name}", 1)[1]
+            body = body.split("\nvoid ", 1)[0]
+            self.assertLess(body.index("g_position_servo.startMove"),
+                            body.index("readAngleSensorDeg(&current_deg)"))
+            failed_read = body.split("readAngleSensorDeg(&current_deg)", 1)[1]
+            lost_branch = failed_read.split("setRepetitiveRunning(false)", 1)[0]
+            self.assertIn("if (!g_angle_sensor.active())", lost_branch)
+            self.assertIn("forceMotorSafeForSensorLoss()", lost_branch)
+            self.assertIn("return", lost_branch)
+            self.assertIn("setRepetitiveRunning(false)", failed_read)
 
 
 if __name__ == "__main__":

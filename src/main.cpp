@@ -1249,25 +1249,33 @@ bool setupStationOrAccessPoint() {
 
 void startAutomaticPositionMove(
     float target_deg, float rpm, RepetitiveMotionController::Direction direction) {
+  const float limited_rpm = clampf(rpm, 0.1f, g_position_servo.settings().max_target_rpm);
+  AdrcPositionController::MoveDirection adrc_direction =
+    direction == RepetitiveMotionController::Direction::Increasing
+      ? AdrcPositionController::MoveDirection::Clockwise
+      : direction == RepetitiveMotionController::Direction::Decreasing
+        ? AdrcPositionController::MoveDirection::CounterClockwise
+        : AdrcPositionController::MoveDirection::Shortest;
+  g_position_servo.startMove(target_deg, limited_rpm, adrc_direction);
+
   float current_deg = 0.0f;
   if (!g_angle_sensor.active() || !readAngleSensorDeg(&current_deg)) {
+    if (!g_angle_sensor.active()) {
+      forceMotorSafeForSensorLoss();
+      Serial.println("Sensor perdido ao iniciar movimento automatico; passo aguardando recuperacao");
+      return;
+    }
     setRepetitiveRunning(false);
     Serial.println("ERRO: ciclo automatico parado; falha ao ler sensor angular");
     return;
   }
 
-  const float limited_rpm = clampf(rpm, 0.1f, g_position_servo.settings().max_target_rpm);
-  AdrcPositionController::MoveDirection adrc_direction;
   if (direction == RepetitiveMotionController::Direction::ByNumericComparison) {
     adrc_direction = current_deg < target_deg
       ? AdrcPositionController::MoveDirection::Clockwise
       : AdrcPositionController::MoveDirection::CounterClockwise;
-  } else {
-    adrc_direction = direction == RepetitiveMotionController::Direction::Increasing
-      ? AdrcPositionController::MoveDirection::Clockwise
-      : AdrcPositionController::MoveDirection::CounterClockwise;
+    g_position_servo.startMove(target_deg, limited_rpm, adrc_direction);
   }
-  g_position_servo.startMove(target_deg, limited_rpm, adrc_direction);
   g_position_servo.primeAccumulatedAngle(current_deg);
   g_move_done_reported = false;
   g_move_start_ms = millis();
@@ -1275,12 +1283,6 @@ void startAutomaticPositionMove(
 
 void startSequencePositionMove(float target_deg, float rpm,
                                MotionDirection direction) {
-  float current_deg = 0.0f;
-  if (!g_angle_sensor.active() || !readAngleSensorDeg(&current_deg)) {
-    setRepetitiveRunning(false);
-    Serial.println("ERRO: sequencia parada; falha ao ler sensor angular");
-    return;
-  }
   AdrcPositionController::MoveDirection servo_direction =
     AdrcPositionController::MoveDirection::Shortest;
   if (direction == MotionDirection::Clockwise) {
@@ -1291,6 +1293,18 @@ void startSequencePositionMove(float target_deg, float rpm,
   const float limited_rpm = clampf(
     rpm, 0.1f, g_position_servo.settings().max_target_rpm);
   g_position_servo.startMove(target_deg, limited_rpm, servo_direction);
+
+  float current_deg = 0.0f;
+  if (!g_angle_sensor.active() || !readAngleSensorDeg(&current_deg)) {
+    if (!g_angle_sensor.active()) {
+      forceMotorSafeForSensorLoss();
+      Serial.println("Sensor perdido ao iniciar passo; movimento aguardando recuperacao");
+      return;
+    }
+    setRepetitiveRunning(false);
+    Serial.println("ERRO: sequencia parada; falha ao ler sensor angular");
+    return;
+  }
   g_position_servo.primeAccumulatedAngle(current_deg);
   g_move_done_reported = false;
   g_move_start_ms = millis();

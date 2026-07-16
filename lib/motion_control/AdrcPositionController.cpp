@@ -17,6 +17,7 @@ void AdrcPositionController::startMove(float target_deg, float max_speed_rpm,
                              fminf(settings_.max_target_rpm,
                                    settings_.physical_max_rpm));
   active_ = true;
+  accumulated_initialized_ = false;
   kicking_ = settings_.kick_ms > 0;
   stalled_ = false;
   observer_initialized_ = false;
@@ -75,11 +76,14 @@ void AdrcPositionController::primeAccumulatedAngle(float current_deg) {
 
 void AdrcPositionController::resumeAtAngle(float current_deg, uint32_t now_ms) {
   if (!active_) return;
-  const float normalized = normalize360(current_deg);
-  current_accumulated_deg_ +=
-    shortestDelta(last_current_deg_normalized_, normalized);
-  last_current_deg_normalized_ = normalized;
-  accumulated_initialized_ = true;
+  if (!accumulated_initialized_) {
+    primeAccumulatedAngle(current_deg);
+  } else {
+    const float normalized = normalize360(current_deg);
+    current_accumulated_deg_ +=
+      shortestDelta(last_current_deg_normalized_, normalized);
+    last_current_deg_normalized_ = normalized;
+  }
   kicking_ = false;
   stalled_ = false;
   samples_in_window_ = 0;
