@@ -37,8 +37,10 @@ class AdrcPositionController {
 
   void startMove(float target_deg, float max_speed_rpm,
                  MoveDirection direction = MoveDirection::Shortest);
+  bool setPendingDirection(MoveDirection direction);
   void cancel();
   void primeAccumulatedAngle(float current_deg);
+  void resumeAtAngle(float current_deg, uint32_t now_ms);
   float computeOutputPercent(float current_deg, uint32_t now_ms);
 
   bool isActive() const { return active_; }

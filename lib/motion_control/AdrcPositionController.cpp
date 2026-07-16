@@ -17,6 +17,7 @@ void AdrcPositionController::startMove(float target_deg, float max_speed_rpm,
                              fminf(settings_.max_target_rpm,
                                    settings_.physical_max_rpm));
   active_ = true;
+  accumulated_initialized_ = false;
   kicking_ = settings_.kick_ms > 0;
   stalled_ = false;
   observer_initialized_ = false;
@@ -30,6 +31,12 @@ void AdrcPositionController::startMove(float target_deg, float max_speed_rpm,
   last_output_pwm_ = 0.0f;
   last_pwm_output_percent_ = 0;
   velocity_estimator_.reset();
+}
+
+bool AdrcPositionController::setPendingDirection(MoveDirection direction) {
+  if (!active_ || accumulated_initialized_) return false;
+  direction_ = direction;
+  return true;
 }
 
 void AdrcPositionController::cancel() {
@@ -71,6 +78,32 @@ void AdrcPositionController::primeAccumulatedAngle(float current_deg) {
   profiled_target_deg_ = current_accumulated_deg_;
   profile_velocity_deg_s_ = 0.0f;
   resetObserver(current_accumulated_deg_, millis());
+}
+
+void AdrcPositionController::resumeAtAngle(float current_deg, uint32_t now_ms) {
+  if (!active_) return;
+  if (!accumulated_initialized_) {
+    primeAccumulatedAngle(current_deg);
+  } else {
+    const float normalized = normalize360(current_deg);
+    current_accumulated_deg_ +=
+      shortestDelta(last_current_deg_normalized_, normalized);
+    last_current_deg_normalized_ = normalized;
+  }
+  kicking_ = false;
+  stalled_ = false;
+  samples_in_window_ = 0;
+  stall_started_ms_ = 0;
+  commanded_rpm_ = 0.0f;
+  profile_velocity_deg_s_ = 0.0f;
+  last_error_pos_deg_ = 0.0f;
+  last_output_pwm_ = 0.0f;
+  last_pwm_output_percent_ = 0;
+  velocity_estimator_.reset();
+  profiled_target_deg_ = current_accumulated_deg_;
+  resetObserver(current_accumulated_deg_, now_ms);
+  move_started_ms_ = now_ms;
+  last_compute_ms_ = now_ms;
 }
 
 void AdrcPositionController::resetObserver(float position_deg, uint32_t now_ms) {

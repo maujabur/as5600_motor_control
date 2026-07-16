@@ -1,8 +1,8 @@
-# Motor Control — ADRC + AS5600
+# Motor Control — ADRC + AS5600/MT6701
 
 Firmware para movimento angular repetitivo de um motor DC lento (`rated` 2 RPM),
-com realimentação pelo sensor magnético AS5600, controle ADRC, configuração web,
-persistência em NVS e atualização OTA.
+com realimentação por sensor magnético AS5600 ou MT6701, controle ADRC,
+configuração web, persistência em NVS e atualização OTA.
 
 O equipamento opera de forma autônoma depois de configurado. A serial é usada
 somente para logs; comandos recebidos são descartados.
@@ -32,12 +32,20 @@ Placa alvo: **Waveshare ESP32-S3-Zero**.
 | Ponte H — canal A, IN2 | 2 |
 | Ponte H — canal B, IN1 | 3 |
 | Ponte H — canal B, IN2 | 4 |
-| AS5600 SDA | 5 |
-| AS5600 SCL | 6 |
+| Sensor angular — SDA compartilhado | 5 |
+| Sensor angular — SCL compartilhado | 6 |
 | Botão auxiliar OTA/AP | 7 |
 
 Os dois canais da ponte H são comandados de forma espelhada na configuração
-atual. O AS5600 usa I²C Fast Mode em 400 kHz.
+atual. O sensor angular usa I²C Fast Mode em 400 kHz.
+
+| Sensor | Endereço I²C | Resolução |
+|---|---:|---:|
+| AS5600 | `0x36` | 12 bits |
+| MT6701 | `0x06` ou `0x46` | 14 bits |
+
+Conecte apenas um sensor angular por vez. A seleção entre AS5600 e MT6701 é
+automática durante a inicialização e nas tentativas de redetecção.
 
 Use GND comum entre ESP32, sensor, ponte H e fonte do motor. A alimentação do
 motor não deve passar pelo regulador da placa.
@@ -64,6 +72,8 @@ motor não deve passar pelo regulador da placa.
 - Potência e duração do kick.
 - Tempo e velocidade para detecção de stall.
 - Janela e número de amostras do estimador de velocidade.
+- Número de falhas consecutivas do sensor antes da desconexão (`sensorFailures`,
+  padrão 3).
 
 Os ajustes avançados só podem ser alterados com o motor parado. Todos os campos
 das duas páginas são persistidos na NVS.
@@ -85,6 +95,12 @@ como um bloco versionado na NVS ao ser salva pela interface.
 
 STOP cancela imediatamente homing, ajuste pontual ou ciclo automático e salva
 `running=off`.
+
+Se o sensor angular for desconectado, o PWM é bloqueado depois de
+`sensorFailures` falhas consecutivas. A redetecção automática ocorre a cada
+1 segundo. Quando o sensor volta, um movimento interrompido retoma o mesmo
+passo com uma nova rampa de aceleração. STOP ou o início de uma transferência
+OTA cancelam essa retomada automática pendente.
 
 ## Wi-Fi
 
@@ -179,13 +195,15 @@ O ambiente requer o PlatformIO Core gerenciado pelo VS Code, normalmente em:
 | PWM carrier | 500 Hz / 8 bits |
 | Stall | 2°/s por 1500 ms |
 | Estimador de velocidade | 400 ms / 8 amostras |
+| Falhas do sensor (`sensorFailures`) | 3 |
+| Intervalo de redetecção do sensor | 1 s |
 
 Valores já gravados na NVS têm prioridade sobre esses defaults.
 
 ## Segurança e comissionamento
 
 1. Comece com `running=off` e limite de potência reduzido.
-2. Confirme no painel que o AS5600 acompanha o sentido real do eixo.
+2. Confirme no painel que o sensor angular acompanha o sentido real do eixo.
 3. Teste primeiro “IR AO INÍCIO” e “IR AO FIM”.
 4. Verifique que CW aumenta e CCW diminui os graus.
 5. Ajuste PWM mínimo apenas até vencer o atrito de forma confiável.
@@ -201,8 +219,11 @@ de potência da ponte H.
 include/
   wifi_credentials.example.h
 lib/motion_control/
+  AngleSensor.h
+  AngleSensorManager.*
   AdrcPositionController.*
   As5600Sensor.*
+  Mt6701Sensor.*
   RepetitiveMotionController.*
   VelocityEstimator.*
 src/

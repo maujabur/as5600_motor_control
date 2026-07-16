@@ -43,6 +43,7 @@ class MotionSequenceController {
   void setRunning(bool running, uint32_t now_ms);
   void stop();
   void update(uint32_t now_ms);
+  void resumeAfterPause(uint32_t paused_ms);
   bool running() const { return running_; }
   Phase phase() const { return phase_; }
   uint8_t currentStep() const { return current_step_index_; }

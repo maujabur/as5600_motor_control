@@ -43,10 +43,13 @@ static const char CONTROL_SETTINGS_WEB_PAGE[] PROGMEM = R"HTML(
 <div class="field"><label for="velWindow">Janela de medição</label><div class="input"><input id="velWindow" type="number" min="20" max="1000" step="10" required><span class="unit">ms</span></div></div>
 <div class="field"><label for="velSamples">Número de amostras</label><div class="input"><input id="velSamples" type="number" min="2" max="20" step="1" required><span class="unit">N</span></div></div>
 </div></section>
+<section><h2>Proteção do sensor angular</h2><div class="grid">
+<div class="field"><label for="sensorFailures">Falhas consecutivas do sensor</label><div class="input"><input id="sensorFailures" type="number" min="1" max="20" step="1" required><span class="unit">N</span></div><div class="hint">Ao atingir o limite, o PWM é zerado e a reconexão começa.</div></div>
+</div></section>
 <div class="actions"><button class="save" id="save" type="submit">SALVAR AJUSTES</button><div class="message" id="message">Carregando configuração…</div></div>
 </form></main>
 <script>
-const ids=['wc','wo','b0','maxRpm','physRpm','powerLimit','pwmHz','minPwm','stopWindow','stopSamples','accelMs','decelMs','kickPct','kickMs','stallMs','stallVel','velWindow','velSamples'];const $=id=>document.getElementById(id);
+const ids=['wc','wo','b0','maxRpm','physRpm','powerLimit','pwmHz','minPwm','stopWindow','stopSamples','accelMs','decelMs','kickPct','kickMs','stallMs','stallVel','velWindow','velSamples','sensorFailures'];const $=id=>document.getElementById(id);
 async function api(body){let o={method:body?'POST':'GET'};if(body){o.headers={'Content-Type':'application/x-www-form-urlencoded'};o.body=new URLSearchParams(body)}let r=await fetch('/api/settings',o),j=await r.json();if(!r.ok)throw Error(j.error||'Falha na operação');return j}
 let messageTimer;
 function msg(t,e=false){clearTimeout(messageTimer);const el=$('message');el.textContent=t;el.className='message'+(e?' error':'');if(t)messageTimer=setTimeout(()=>{el.textContent='';el.className='message'},5000)}
