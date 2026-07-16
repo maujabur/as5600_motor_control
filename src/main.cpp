@@ -5,7 +5,7 @@
 #include <WiFi.h>
 #include <esp_wifi.h>
 
-#include <As5600Sensor.h>
+#include <AngleSensorManager.h>
 #include <AdrcPositionController.h>
 #include <MotionSequenceController.h>
 #include <RepetitiveMotionController.h>
@@ -146,8 +146,10 @@ uint32_t g_ota_button_pressed_ms = 0;
 
 char   g_serial_line[SERIAL_LINE_BUFFER];
 size_t g_serial_index = 0;
-As5600Sensor            g_as5600;
-AdrcPositionController g_position_servo;
+AngleSensorManager g_angle_sensor;
+AdrcPositionController   g_position_servo;
+bool                     g_sensor_pause_active = false;
+bool                     g_run_when_sensor_detected = false;
 bool                    g_move_done_reported = false;
 bool                    g_adrc_stall_fault = false;
 bool                    g_serial_prompt_pending = true;
@@ -179,7 +181,7 @@ uint32_t                g_pwm_frequency_hz = PWM_DEFAULT_FREQUENCY_HZ;
 uint32_t                g_move_debug_last_print_ms = 0;
 
 // Adaptadores: a camada de movimento repetitivo conhece apenas estes comandos
-// genericos, sem depender do AS5600 ou do controlador ADRC concreto.
+// genericos, sem depender do sensor angular ou do controlador ADRC concreto.
 void startAutomaticPositionMove(
   float target_deg, float rpm, RepetitiveMotionController::Direction direction);
 void startSequencePositionMove(float target_deg, float rpm, MotionDirection direction);
@@ -356,7 +358,8 @@ bool parseWebNumber(const char* name, float* value) {
 
 void sendWebStatus(int status_code = 200) {
   float angle_deg = 0.0f;
-  const bool sensor_ok = g_as5600.detected() && g_as5600.readAngleDeg(&angle_deg);
+  const bool sensor_ok = g_angle_sensor.active() &&
+                         g_angle_sensor.readAngleDeg(&angle_deg);
   String json;
   json.reserve(320);
   json += F("{\"unit\":");
@@ -617,8 +620,8 @@ void setupWebControl() {
       sendWebError(409, "Atualizacao OTA em andamento");
       return;
     }
-    if (requested && !g_as5600.detected()) {
-      sendWebError(409, "AS5600 nao detectado");
+    if (requested && !g_angle_sensor.active()) {
+      sendWebError(409, "Sensor angular nao detectado");
       return;
     }
     if (requested) g_adrc_stall_fault = false;
@@ -634,8 +637,8 @@ void setupWebControl() {
       sendWebError(409, "Atualizacao OTA em andamento");
       return;
     }
-    if (!g_as5600.detected()) {
-      sendWebError(409, "AS5600 nao detectado");
+    if (!g_angle_sensor.active()) {
+      sendWebError(409, "Sensor angular nao detectado");
       return;
     }
     if (!g_web_server.hasArg("target")) {
@@ -663,8 +666,8 @@ void setupWebControl() {
       sendWebError(409, "Movimento avulso permitido somente com o motor parado");
       return;
     }
-    if (!g_as5600.detected()) {
-      sendWebError(409, "AS5600 nao detectado");
+    if (!g_angle_sensor.active()) {
+      sendWebError(409, "Sensor angular nao detectado");
       return;
     }
 
@@ -683,8 +686,8 @@ void setupWebControl() {
     }
 
     float current_deg = 0.0f;
-    if (!g_as5600.readAngleDeg(&current_deg)) {
-      sendWebError(503, "Falha ao ler AS5600");
+    if (!g_angle_sensor.readAngleDeg(&current_deg)) {
+      sendWebError(503, "Falha ao ler sensor angular");
       return;
     }
 
@@ -799,17 +802,47 @@ bool setPwmFrequencyHz(uint32_t hz) {
   return true;
 }
 
+void updateAngleSensorRecovery(uint32_t now_ms) {
+  g_angle_sensor.update(now_ms);
+  if (g_angle_sensor.consumeLostEvent()) {
+    g_sensor_pause_active = g_position_servo.isActive();
+    g_state.target_percent = 0.0f;
+    g_state.current_percent = 0.0f;
+    g_state.drive_phase = DrivePhase::IDLE;
+    applyMotorOutput(0);
+    Serial.printf("Sensor angular perdido apos %u falhas; PWM bloqueado\n",
+                  g_angle_sensor.failureLimit());
+  }
+
+  float recovered_angle_deg = 0.0f;
+  if (g_angle_sensor.consumeRecoveredEvent(&recovered_angle_deg)) {
+    Serial.printf("%s reconectado em 0x%02X\n",
+                  g_angle_sensor.sensorName(), g_angle_sensor.sensorAddress());
+    if (g_sensor_pause_active && g_position_servo.isActive() &&
+        !g_ota_update_in_progress) {
+      g_position_servo.resumeAtAngle(recovered_angle_deg, now_ms);
+      g_move_prev_sample_valid = false;
+      g_move_rpm_window_delta_deg = 0.0f;
+      g_move_rpm_window_dt_ms = 0;
+    }
+    g_sensor_pause_active = false;
+  }
+
+  if (g_run_when_sensor_detected && g_angle_sensor.active() &&
+      !g_ota_update_in_progress) {
+    g_run_when_sensor_detected = false;
+    setRepetitiveRunning(true, false);
+    Serial.println("Sensor detectado; iniciando ciclo persistente");
+  }
+}
+
 void updatePositionMoveControl() {
-  if (!g_as5600.detected()) {
-    g_move_tracking_active = false;
-    g_move_prev_sample_valid = false;
-    g_move_total_abs_delta_deg = 0.0f;
-    g_move_total_net_delta_deg = 0.0f;
-    g_move_total_progress_deg = 0.0f;
-    g_move_start_accumulated_captured = false;
-    g_move_rpm_window_delta_deg = 0.0f;
-    g_move_rpm_window_dt_ms = 0;
-    g_move_debug_last_print_ms = 0;
+  if (g_sensor_pause_active ||
+      (g_position_servo.isActive() && !g_angle_sensor.active())) {
+    g_state.target_percent = 0.0f;
+    g_state.current_percent = 0.0f;
+    g_state.drive_phase = DrivePhase::IDLE;
+    applyMotorOutput(0);
     return;
   }
 
@@ -850,7 +883,7 @@ void updatePositionMoveControl() {
   }
 
   float current_deg = 0.0f;
-  if (!g_as5600.readAngleDeg(&current_deg)) return;
+  if (!g_angle_sensor.readAngleDeg(&current_deg)) return;
 
   const uint32_t now_ms = millis();
 
@@ -1069,6 +1102,8 @@ void applyBrakeOutput() {
 
 void stopMotorForOta() {
   g_sequence_motion.stop();
+  g_sensor_pause_active = false;
+  g_run_when_sensor_detected = false;
   g_move_tracking_active = false;
   g_state.target_percent = 0.0f;
   g_state.current_percent = 0.0f;
@@ -1188,9 +1223,9 @@ bool setupStationOrAccessPoint() {
 void startAutomaticPositionMove(
     float target_deg, float rpm, RepetitiveMotionController::Direction direction) {
   float current_deg = 0.0f;
-  if (!g_as5600.detected() || !g_as5600.readAngleDeg(&current_deg)) {
+  if (!g_angle_sensor.active() || !g_angle_sensor.readAngleDeg(&current_deg)) {
     setRepetitiveRunning(false);
-    Serial.println("ERRO: ciclo automatico parado; falha ao ler AS5600");
+    Serial.println("ERRO: ciclo automatico parado; falha ao ler sensor angular");
     return;
   }
 
@@ -1214,9 +1249,9 @@ void startAutomaticPositionMove(
 void startSequencePositionMove(float target_deg, float rpm,
                                MotionDirection direction) {
   float current_deg = 0.0f;
-  if (!g_as5600.detected() || !g_as5600.readAngleDeg(&current_deg)) {
+  if (!g_angle_sensor.active() || !g_angle_sensor.readAngleDeg(&current_deg)) {
     setRepetitiveRunning(false);
-    Serial.println("ERRO: sequencia parada; falha ao ler AS5600");
+    Serial.println("ERRO: sequencia parada; falha ao ler sensor angular");
     return;
   }
   AdrcPositionController::MoveDirection servo_direction =
@@ -1240,6 +1275,8 @@ bool isAutomaticPositionMoveActive() {
 
 void stopAutomaticPositionMove() {
   g_position_servo.cancel();
+  g_sensor_pause_active = false;
+  g_run_when_sensor_detected = false;
   g_state.target_percent = 0.0f;
   g_state.current_percent = 0.0f;
   g_state.drive_phase = DrivePhase::IDLE;
@@ -1391,9 +1428,9 @@ void printStatus() {
   Serial.printf("PWM: freq=%u Hz  resolucao=%u bits\n",
                 g_pwm_frequency_hz,
                 PWM_RESOLUTION_BITS);
-  Serial.printf("AS5600: %s (0x%02X)\n",
-                g_as5600.detected() ? "detectado" : "nao detectado",
-                g_as5600.address());
+  Serial.printf("Sensor angular: %s (%s, 0x%02X)\n",
+                g_angle_sensor.active() ? "detectado" : "nao detectado",
+                g_angle_sensor.sensorName(), g_angle_sensor.sensorAddress());
 
   if (g_position_servo.isActive()) {
     Serial.printf("Move: ON  alvo=%.2f deg  vmax=%.2f rpm  erro_pos=%.2f deg\n",
@@ -1464,7 +1501,7 @@ void printHelp() {
   Serial.println();
   Serial.println("  Interface:");
   Serial.println("    echo | e on|off           -> eco serial");
-  Serial.println("    g                         -> le posicao AS5600");
+  Serial.println("    g                         -> le posicao do sensor angular");
   Serial.println();
   Serial.println("  Posicionamento com ADRC:");
   Serial.println("    q | goto <deg> [rpm] [short|cw|ccw]");
@@ -1580,8 +1617,8 @@ void parseAndHandleCommand(char* line) {
       return;
     }
     if (!strcmp(val,"on") || !strcmp(val,"1") || !strcmp(val,"true")) {
-      if (!g_as5600.detected()) {
-        printErrorAndPrompt("ERRO: AS5600 nao detectado no I2C");
+      if (!g_angle_sensor.active()) {
+        printErrorAndPrompt("ERRO: sensor angular nao detectado no I2C");
         return;
       }
       setRepetitiveRunning(true);
@@ -1653,19 +1690,20 @@ void parseAndHandleCommand(char* line) {
   }
 
   if (!strcmp(cmd,"g")) {
-    if (!g_as5600.detected()) {
-      Serial.println("ERRO: AS5600 nao detectado no I2C");
+    if (!g_angle_sensor.active()) {
+      Serial.println("ERRO: sensor angular nao detectado no I2C");
       return;
     }
 
     uint16_t raw_angle = 0;
-    if (!g_as5600.readRawAngle(&raw_angle)) {
-      Serial.println("ERRO: falha ao ler AS5600");
+    if (!g_angle_sensor.readRawAngle(&raw_angle)) {
+      Serial.println("ERRO: falha ao ler sensor angular");
       return;
     }
 
     const float degrees = ((float)raw_angle * 360.0f) / 4096.0f;
-    Serial.printf("AS5600: raw=%u  deg=%.2f\n", raw_angle, degrees);
+    Serial.printf("%s: raw=%u  deg=%.2f\n",
+                  g_angle_sensor.sensorName(), raw_angle, degrees);
     return;
   }
 
@@ -1705,8 +1743,8 @@ void parseAndHandleCommand(char* line) {
 
   if (!strcmp(cmd,"q") || !strcmp(cmd,"goto") || !strcmp(cmd,"go")
       || !strcmp(cmd,"move") || !strcmp(cmd,"cw") || !strcmp(cmd,"ccw")) {
-    if (!g_as5600.detected()) {
-      printErrorAndPrompt("ERRO: AS5600 nao detectado no I2C");
+    if (!g_angle_sensor.active()) {
+      printErrorAndPrompt("ERRO: sensor angular nao detectado no I2C");
       return;
     }
     setRepetitiveRunning(false);
@@ -1739,8 +1777,8 @@ void parseAndHandleCommand(char* line) {
     vmax_rpm = clampf(vmax_rpm, 0.0f, s.max_target_rpm);
 
     float current_deg = 0.0f;
-    if (!g_as5600.readAngleDeg(&current_deg)) {
-      printErrorAndPrompt("ERRO: falha ao ler AS5600");
+    if (!g_angle_sensor.readAngleDeg(&current_deg)) {
+      printErrorAndPrompt("ERRO: falha ao ler sensor angular");
       return;
     }
 
@@ -1756,8 +1794,8 @@ void parseAndHandleCommand(char* line) {
   }
 
   if (!strcmp(cmd,"inc")) {
-    if (!g_as5600.detected()) {
-      printErrorAndPrompt("ERRO: AS5600 nao detectado no I2C");
+    if (!g_angle_sensor.active()) {
+      printErrorAndPrompt("ERRO: sensor angular nao detectado no I2C");
       return;
     }
     setRepetitiveRunning(false);
@@ -1782,8 +1820,8 @@ void parseAndHandleCommand(char* line) {
     vmax_rpm = clampf(vmax_rpm, 0.0f, s.max_target_rpm);
 
     float current_deg = 0.0f;
-    if (!g_as5600.readAngleDeg(&current_deg)) {
-      printErrorAndPrompt("ERRO: falha ao ler AS5600");
+    if (!g_angle_sensor.readAngleDeg(&current_deg)) {
+      printErrorAndPrompt("ERRO: falha ao ler sensor angular");
       return;
     }
 
@@ -1805,8 +1843,8 @@ void parseAndHandleCommand(char* line) {
   }
 
   if (!strcmp(cmd,"dec")) {
-    if (!g_as5600.detected()) {
-      printErrorAndPrompt("ERRO: AS5600 nao detectado no I2C");
+    if (!g_angle_sensor.active()) {
+      printErrorAndPrompt("ERRO: sensor angular nao detectado no I2C");
       return;
     }
     setRepetitiveRunning(false);
@@ -1831,8 +1869,8 @@ void parseAndHandleCommand(char* line) {
     vmax_rpm = clampf(vmax_rpm, 0.0f, s.max_target_rpm);
 
     float current_deg = 0.0f;
-    if (!g_as5600.readAngleDeg(&current_deg)) {
-      printErrorAndPrompt("ERRO: falha ao ler AS5600");
+    if (!g_angle_sensor.readAngleDeg(&current_deg)) {
+      printErrorAndPrompt("ERRO: falha ao ler sensor angular");
       return;
     }
 
@@ -2269,6 +2307,15 @@ void updateRampControl() {
   if (dt < CONTROL_PERIOD_MS) return;
   g_state.last_control_update_ms = now;
 
+  if (g_sensor_pause_active ||
+      (g_position_servo.isActive() && !g_angle_sensor.active())) {
+    g_state.target_percent = 0.0f;
+    g_state.current_percent = 0.0f;
+    g_state.drive_phase = DrivePhase::IDLE;
+    applyMotorOutput(0);
+    return;
+  }
+
   const bool servo_active = g_position_servo.isActive();
 
   // No modo de posicionamento, usa diretamente a saida calculada pelo ADRC
@@ -2441,7 +2488,7 @@ void setup() {
   setPwmFrequencyHz(g_pwm_frequency_hz);
   configurePwmOutputs(g_pwm_frequency_hz, PWM_RESOLUTION_BITS);
 
-  g_as5600.begin(Wire, I2C_SDA_PIN, I2C_SCL_PIN);
+  g_angle_sensor.begin(Wire, I2C_SDA_PIN, I2C_SCL_PIN, 400000);
 
   pinMode(MOTOR_A_IN1, OUTPUT);
   pinMode(MOTOR_A_IN2, OUTPUT);
@@ -2469,19 +2516,21 @@ void setup() {
     Serial.printf("WiFi: AP de contingencia  SSID=%s  canal=%u  painel=http://192.168.4.1/\n",
                   OTA_AP_SSID, WIFI_AP_CHANNEL);
   }
-  if (g_as5600.detected()) {
-    Serial.printf("AS5600 detectado no endereco 0x%02X\n", g_as5600.address());
+  if (g_angle_sensor.active()) {
+    Serial.printf("%s detectado no endereco 0x%02X\n",
+                  g_angle_sensor.sensorName(), g_angle_sensor.sensorAddress());
   } else {
-    Serial.printf("AS5600 NAO detectado no endereco 0x%02X\n", g_as5600.address());
+    Serial.println("Sensor angular nao detectado; procurando periodicamente");
   }
   Serial.println("ADRC pronto (motor nominal 2 rpm)");
 
   if (g_repetitive_run_on_boot) {
-    if (g_as5600.detected()) {
+    if (g_angle_sensor.active()) {
       Serial.println("Ciclo persistente: running=on; iniciando homing no ponto inicial");
       setRepetitiveRunning(true, false);
     } else {
-      Serial.println("ERRO: ciclo salvo como running=on, mas AS5600 nao foi detectado");
+      g_run_when_sensor_detected = true;
+      Serial.println("Ciclo persistente: aguardando sensor angular");
     }
   }
 
@@ -2494,7 +2543,9 @@ void loop() {
 
   // Mantem a serial exclusivamente para logs; qualquer entrada e descartada.
   while (Serial.available() > 0) Serial.read();
-  g_sequence_motion.update(millis());
+  const uint32_t now_ms = millis();
+  updateAngleSensorRecovery(now_ms);
+  g_sequence_motion.update(now_ms);
   updatePositionMoveControl();
   updateRampControl();
 

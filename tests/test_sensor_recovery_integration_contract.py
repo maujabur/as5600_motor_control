@@ -18,6 +18,28 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
             self.assertIn(token, body)
         self.assertNotIn("active_ = false", body)
 
+    def test_main_uses_generic_manager_and_no_as5600_global(self):
+        main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
+        self.assertIn("AngleSensorManager g_angle_sensor", main)
+        self.assertNotIn("As5600Sensor            g_as5600", main)
+        self.assertNotIn("g_as5600.", main)
+
+    def test_loss_forces_zero_and_recovery_resumes_active_move(self):
+        main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
+        self.assertIn("consumeLostEvent()", main)
+        self.assertIn("applyMotorOutput(0)", main)
+        self.assertIn("g_sensor_pause_active", main)
+        self.assertIn("consumeRecoveredEvent(&recovered_angle_deg)", main)
+        self.assertIn("resumeAtAngle(recovered_angle_deg, now_ms)", main)
+
+    def test_loop_updates_detection_before_motion_and_pwm(self):
+        main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
+        loop = main.split("void loop()", 1)[1]
+        order = [loop.index(token) for token in
+                 ("updateAngleSensorRecovery", "g_sequence_motion.update",
+                  "updatePositionMoveControl", "updateRampControl")]
+        self.assertEqual(order, sorted(order))
+
 
 if __name__ == "__main__":
     unittest.main()
