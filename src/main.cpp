@@ -46,7 +46,7 @@ constexpr uint8_t WIFI_AP_CHANNEL = WIFI_AP_CHANNEL_SLOT == 0U ? 1U
 constexpr uint8_t OTA_BUTTON_PIN = 7;
 constexpr uint32_t OTA_BUTTON_HOLD_MS = 1500;
 
-// ESP32-C3 Super Mini + L298N
+// Waveshare ESP32-S3-Zero + L298N
 // IN1/IN2 = motor A,  IN3/IN4 = motor B  (A é o padrao deste projeto)
 constexpr uint8_t  MOTOR_A_IN1            = 1;
 constexpr uint8_t  MOTOR_A_IN2            = 2;
@@ -2589,7 +2589,7 @@ void setup() {
   g_ota_mode_active = setupStationOrAccessPoint();
 
   Serial.println("\n=== Motor PWM Tester ===");
-  Serial.println("Placa: ESP32-C3 Super Mini  |  Motor padrao: IN3/IN4");
+  Serial.println("Placa: Waveshare ESP32-S3-Zero  |  Motor padrao: IN3/IN4");
   Serial.printf("PWM: freq=%u Hz  resolucao=%u bits\n", g_pwm_frequency_hz, PWM_RESOLUTION_BITS);
   Serial.printf("I2C: SDA=%u SCL=%u\n", I2C_SDA_PIN, I2C_SCL_PIN);
   if (WiFi.status() == WL_CONNECTED) {
