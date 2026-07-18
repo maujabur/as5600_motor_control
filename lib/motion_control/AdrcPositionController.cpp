@@ -33,6 +33,39 @@ void AdrcPositionController::startMove(float target_deg, float max_speed_rpm,
   velocity_estimator_.reset();
 }
 
+bool AdrcPositionController::retargetMove(float target_deg,
+                                          float max_speed_rpm,
+                                          MoveDirection direction) {
+  if (!active_ || !accumulated_initialized_) return false;
+  direction_ = direction;
+  target_deg_ = normalize360(target_deg);
+  max_speed_rpm_ = constrain(max_speed_rpm, 0.1f,
+                             fminf(settings_.max_target_rpm,
+                                   settings_.physical_max_rpm));
+
+  const float normalized_current = normalize360(current_accumulated_deg_);
+  float delta = normalize360(target_deg_) - normalized_current;
+  switch (direction_) {
+    case MoveDirection::Clockwise:
+      while (delta < 0.0f) delta += 360.0f;
+      break;
+    case MoveDirection::CounterClockwise:
+      while (delta > 0.0f) delta -= 360.0f;
+      break;
+    case MoveDirection::Shortest:
+    default:
+      delta = shortestDelta(normalized_current, target_deg_);
+      break;
+  }
+  target_accumulated_deg_ = current_accumulated_deg_ + delta;
+  samples_in_window_ = 0;
+  stalled_ = false;
+  stall_started_ms_ = 0;
+  kicking_ = false;
+  move_started_ms_ = millis();
+  return true;
+}
+
 bool AdrcPositionController::setPendingDirection(MoveDirection direction) {
   if (!active_ || accumulated_initialized_) return false;
   direction_ = direction;

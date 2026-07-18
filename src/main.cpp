@@ -188,7 +188,10 @@ uint32_t                g_move_debug_last_print_ms = 0;
 void startAutomaticPositionMove(
   float target_deg, float rpm, RepetitiveMotionController::Direction direction);
 void startSequencePositionMove(float target_deg, float rpm, MotionDirection direction);
+bool continueSequencePositionMove(float target_deg, float rpm,
+                                  MotionDirection direction);
 bool isAutomaticPositionMoveActive();
+bool isAutomaticPositionMoveNearTarget();
 void stopAutomaticPositionMove();
 void applyMotorOutput(int16_t signed_pwm);
 void forceMotorSafeForSensorLoss();
@@ -204,7 +207,9 @@ RepetitiveMotionController g_repetitive_motion({
 });
 MotionSequenceController g_sequence_motion({
   startSequencePositionMove,
+  continueSequencePositionMove,
   isAutomaticPositionMoveActive,
+  isAutomaticPositionMoveNearTarget,
   stopAutomaticPositionMove
 });
 
@@ -1353,8 +1358,33 @@ void startSequencePositionMove(float target_deg, float rpm,
   g_move_start_ms = millis();
 }
 
+bool continueSequencePositionMove(float target_deg, float rpm,
+                                  MotionDirection direction) {
+  g_pending_numeric_direction = false;
+  AdrcPositionController::MoveDirection servo_direction =
+    AdrcPositionController::MoveDirection::Shortest;
+  if (direction == MotionDirection::Clockwise) {
+    servo_direction = AdrcPositionController::MoveDirection::Clockwise;
+  } else if (direction == MotionDirection::CounterClockwise) {
+    servo_direction = AdrcPositionController::MoveDirection::CounterClockwise;
+  }
+  const float limited_rpm = clampf(
+    rpm, 0.1f, g_position_servo.settings().max_target_rpm);
+  const bool accepted =
+    g_position_servo.retargetMove(target_deg, limited_rpm, servo_direction);
+  if (accepted) {
+    g_move_done_reported = false;
+    g_move_start_ms = millis();
+  }
+  return accepted;
+}
+
 bool isAutomaticPositionMoveActive() {
   return g_position_servo.isActive();
+}
+
+bool isAutomaticPositionMoveNearTarget() {
+  return g_position_servo.isWithinStopWindow();
 }
 
 void stopAutomaticPositionMove() {

@@ -37,6 +37,8 @@ class AdrcPositionController {
 
   void startMove(float target_deg, float max_speed_rpm,
                  MoveDirection direction = MoveDirection::Shortest);
+  bool retargetMove(float target_deg, float max_speed_rpm,
+                    MoveDirection direction = MoveDirection::Shortest);
   bool setPendingDirection(MoveDirection direction);
   void cancel();
   void primeAccumulatedAngle(float current_deg);
@@ -47,6 +49,9 @@ class AdrcPositionController {
   bool isKicking() const { return active_ && kicking_; }
   bool isCruising() const { return active_ && !kicking_; }
   bool isStalled() const { return stalled_; }
+  bool isWithinStopWindow() const {
+    return active_ && fabsf(last_error_pos_deg_) <= settings_.stop_window_deg;
+  }
   float targetDeg() const { return target_deg_; }
   float maxSpeedRpm() const { return max_speed_rpm_; }
   float lastErrorDeg() const { return last_error_pos_deg_; }

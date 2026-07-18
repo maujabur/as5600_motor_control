@@ -26,12 +26,16 @@ struct MotionSequenceConfig {
 class MotionSequenceController {
  public:
   using StartMoveFn = void (*)(float, float, MotionDirection);
+  using ContinueMoveFn = bool (*)(float, float, MotionDirection);
   using IsMoveActiveFn = bool (*)();
+  using IsMoveNearTargetFn = bool (*)();
   using StopMoveFn = void (*)();
 
   struct Commands {
     StartMoveFn start_move = nullptr;
+    ContinueMoveFn continue_move = nullptr;
     IsMoveActiveFn is_move_active = nullptr;
+    IsMoveNearTargetFn is_move_near_target = nullptr;
     StopMoveFn stop_move = nullptr;
   };
 
@@ -51,7 +55,10 @@ class MotionSequenceController {
 
  private:
   const MotionStep& stepAt(uint8_t index) const;
-  void beginStep(uint8_t index);
+  void beginStep(uint8_t index, bool from_step_known, uint8_t from_step_index);
+  int8_t moveDirectionSignFromTo(uint8_t from_step_index,
+                                 uint8_t to_step_index) const;
+  void advanceNextStep();
 
   Commands commands_;
   MotionSequenceConfig config_;
@@ -59,5 +66,6 @@ class MotionSequenceController {
   Phase phase_ = Phase::STOPPED;
   uint8_t current_step_index_ = 0;
   uint8_t next_step_index_ = 1;
+  int8_t current_move_sign_ = 0;
   uint32_t phase_started_ms_ = 0;
 };
