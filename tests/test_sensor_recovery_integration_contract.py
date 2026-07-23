@@ -108,8 +108,8 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
             encoding="utf-8")
         web = (ROOT / "lib/web/WebControlServer.cpp").read_text(encoding="utf-8")
         for token in ('parseNumber("sensorFailures"',
-                      "candidate.sensor.failure_limit =",
-                      "(uint8_t)lroundf(sensor_failures)"):
+                      "BoundedInteger::roundToUint32(sensor_failures, 1, 20",
+                      "candidate.sensor.failure_limit ="):
             self.assertIn(token, web)
         self.assertIn(
             "sensor_.setFailureLimit(settings_.sensor.failure_limit)",

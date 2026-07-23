@@ -29,8 +29,7 @@ class MotorControlApplication final : public WebControlActions,
  private:
   void applySettings(const DeviceSettings& settings);
   void loadSettings();
-  bool saveSettings();
-  void setRunning(bool running, bool persist);
+  bool setRunning(bool running, bool persist);
 
   DeviceSettings settings_ = DeviceSettings::defaults();
   AngleSensorManager sensor_;

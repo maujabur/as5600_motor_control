@@ -1,5 +1,6 @@
 #include "WebControlServer.h"
 
+#include "BoundedInteger.h"
 #include "control_settings_web_page.h"
 #include "repetitive_motion_web_page.h"
 
@@ -54,12 +55,13 @@ bool WebControlServer::parseSequenceStep(
     return false;
   }
   MotionDirection direction;
+  uint32_t dwell_ms = 0;
   if (!parseDirection(server_.arg(prefix + "direction"), &direction) ||
       target < 0.0f || target >= 360.0f || rpm < 0.1f || rpm > max_rpm ||
-      dwell < 0.0f || dwell > 3600000.0f) {
+      !BoundedInteger::roundToUint32(dwell, 0, 3600000, &dwell_ms)) {
     return false;
   }
-  *step = {target, rpm, (uint32_t)lroundf(dwell), direction};
+  *step = {target, rpm, dwell_ms, direction};
   return true;
 }
 
@@ -194,6 +196,32 @@ void WebControlServer::begin() {
       sendError(400, "Parametros invalidos ou incompletos");
       return;
     }
+    uint32_t stop_samples_value, accel_ms_value, decel_ms_value;
+    uint32_t kick_ms_value, stall_ms_value, vel_window_value;
+    uint32_t vel_samples_value, power_limit_value, pwm_hz_value;
+    uint32_t sensor_failures_value;
+    if (!BoundedInteger::roundToUint32(stop_samples, 1, 20,
+                                       &stop_samples_value) ||
+        !BoundedInteger::roundToUint32(accel_ms, 50, 2000,
+                                       &accel_ms_value) ||
+        !BoundedInteger::roundToUint32(decel_ms, 50, 2000,
+                                       &decel_ms_value) ||
+        !BoundedInteger::roundToUint32(kick_ms, 0, 1000, &kick_ms_value) ||
+        !BoundedInteger::roundToUint32(stall_ms, 100, 10000,
+                                       &stall_ms_value) ||
+        !BoundedInteger::roundToUint32(vel_window, 20, 1000,
+                                       &vel_window_value) ||
+        !BoundedInteger::roundToUint32(vel_samples, 2, 20,
+                                       &vel_samples_value) ||
+        !BoundedInteger::roundToUint32(power_limit, 0, 100,
+                                       &power_limit_value) ||
+        !BoundedInteger::roundToUint32(pwm_hz, 500, 20000,
+                                       &pwm_hz_value) ||
+        !BoundedInteger::roundToUint32(sensor_failures, 1, 20,
+                                       &sensor_failures_value)) {
+      sendError(422, "Valor inteiro fora da faixa permitida");
+      return;
+    }
     DeviceSettings candidate = actions_.settings();
     AdrcPositionSettings& p = candidate.position;
     p.control_bandwidth = wc;
@@ -202,19 +230,19 @@ void WebControlServer::begin() {
     p.max_target_rpm = max_rpm;
     p.physical_max_rpm = phys_rpm;
     p.stop_window_deg = stop_window;
-    p.samples_to_stop = (uint16_t)lroundf(stop_samples);
-    p.accel_ramp_ms = (uint16_t)lroundf(accel_ms);
-    p.decel_ramp_ms = (uint16_t)lroundf(decel_ms);
+    p.samples_to_stop = (uint16_t)stop_samples_value;
+    p.accel_ramp_ms = (uint16_t)accel_ms_value;
+    p.decel_ramp_ms = (uint16_t)decel_ms_value;
     p.kick_pwm_percent = kick_pct;
-    p.kick_ms = (uint16_t)lroundf(kick_ms);
+    p.kick_ms = (uint16_t)kick_ms_value;
     p.minimum_drive_pwm_percent = min_pwm;
-    p.stall_timeout_ms = (uint16_t)lroundf(stall_ms);
+    p.stall_timeout_ms = (uint16_t)stall_ms_value;
     p.stall_velocity_deg_s = stall_vel;
-    p.velocity_window_ms = (uint16_t)lroundf(vel_window);
-    p.velocity_num_samples = (uint8_t)lroundf(vel_samples);
-    candidate.motor.power_limit_percent = (uint8_t)lroundf(power_limit);
-    candidate.motor.pwm_frequency_hz = (uint32_t)lroundf(pwm_hz);
-    candidate.sensor.failure_limit = (uint8_t)lroundf(sensor_failures);
+    p.velocity_window_ms = (uint16_t)vel_window_value;
+    p.velocity_num_samples = (uint8_t)vel_samples_value;
+    candidate.motor.power_limit_percent = (uint8_t)power_limit_value;
+    candidate.motor.pwm_frequency_hz = pwm_hz_value;
+    candidate.sensor.failure_limit = (uint8_t)sensor_failures_value;
     candidate.sequence.startup_step.rpm =
       fminf(candidate.sequence.startup_step.rpm, max_rpm);
     for (uint8_t i = 0; i < candidate.sequence.step_count; ++i) {
@@ -329,14 +357,23 @@ void WebControlServer::begin() {
       sendError(400, "Parametros invalidos ou incompletos");
       return;
     }
+    uint32_t wait_start_ms = 0;
+    uint32_t wait_end_ms = 0;
+    if (!BoundedInteger::roundToUint32(wait_start, 0, 3600000,
+                                       &wait_start_ms) ||
+        !BoundedInteger::roundToUint32(wait_end, 0, 3600000,
+                                       &wait_end_ms)) {
+      sendError(422, "Intervalo fora da faixa permitida");
+      return;
+    }
     DeviceSettings candidate = actions_.settings();
     candidate.sequence.startup_step = {
-      start, rpm_back, (uint32_t)lroundf(wait_start), MotionDirection::Shortest};
+      start, rpm_back, wait_start_ms, MotionDirection::Shortest};
     candidate.sequence.step_count = 2;
     candidate.sequence.steps[0] = {
-      end, rpm_out, (uint32_t)lroundf(wait_end), MotionDirection::Clockwise};
+      end, rpm_out, wait_end_ms, MotionDirection::Clockwise};
     candidate.sequence.steps[1] = {
-      start, rpm_back, (uint32_t)lroundf(wait_start), MotionDirection::CounterClockwise};
+      start, rpm_back, wait_start_ms, MotionDirection::CounterClockwise};
     if (!validateDeviceSettings(candidate)) {
       sendError(422, "Valor fora da faixa permitida");
       return;

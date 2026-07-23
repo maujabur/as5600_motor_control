@@ -17,6 +17,7 @@ if "%TARGET%"=="" set "TARGET=all"
 
 if "%TARGET%"=="angle_math" goto angle_math
 if "%TARGET%"=="motion_sequence" goto motion_sequence
+if "%TARGET%"=="bounded_integer" goto bounded_integer
 if "%TARGET%"=="all" goto angle_math
 echo Unknown C++ test target: %TARGET%
 exit /b 2
@@ -37,4 +38,13 @@ cl /nologo /std:c++17 /EHsc /Ilib\domain /Ilib\sequence ^
   /Fe:.pio\msvc-tests\test_motion_sequence.exe /Fo:.pio\msvc-tests\
 if errorlevel 1 exit /b %errorlevel%
 .pio\msvc-tests\test_motion_sequence.exe
+if errorlevel 1 exit /b %errorlevel%
+if not "%TARGET%"=="all" exit /b 0
+
+:bounded_integer
+cl /nologo /std:c++17 /EHsc /Ilib\web ^
+  tests\cpp\test_bounded_integer.cpp lib\web\BoundedInteger.cpp ^
+  /Fe:.pio\msvc-tests\test_bounded_integer.exe /Fo:.pio\msvc-tests\
+if errorlevel 1 exit /b %errorlevel%
+.pio\msvc-tests\test_bounded_integer.exe
 exit /b %errorlevel%

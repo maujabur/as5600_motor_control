@@ -27,6 +27,13 @@ class WebContractTest(unittest.TestCase):
         self.assertNotIn("g_web_server.on", main)
         self.assertNotIn("json +=", main)
 
+    def test_integer_fields_are_bounded_before_narrowing(self):
+        source = WEB_CPP_PATH.read_text(encoding="utf-8")
+        self.assertIn("BoundedInteger::roundToUint32", source)
+        self.assertNotIn("(uint8_t)lroundf", source)
+        self.assertNotIn("(uint16_t)lroundf", source)
+        self.assertNotIn("(uint32_t)lroundf", source)
+
 
 if __name__ == "__main__":
     unittest.main()

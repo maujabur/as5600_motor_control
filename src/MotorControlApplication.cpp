@@ -51,10 +51,6 @@ void MotorControlApplication::applySettings(const DeviceSettings& settings) {
   motor_.setSettings(settings_.motor);
 }
 
-bool MotorControlApplication::saveSettings() {
-  return settings_store_ready_ && settings_store_.save(settings_);
-}
-
 void MotorControlApplication::loadSettings() {
   settings_store_ready_ = settings_store_.begin();
   if (!settings_store_ready_) {
@@ -64,12 +60,20 @@ void MotorControlApplication::loadSettings() {
                                       : DeviceSettings::defaults());
 }
 
-void MotorControlApplication::setRunning(bool running, bool persist) {
-  sequence_.setRunning(running, millis());
-  if (persist && running != settings_.running) {
-    settings_.running = running;
-    saveSettings();
+bool MotorControlApplication::setRunning(bool running, bool persist) {
+  if (!persist || running == settings_.running) {
+    sequence_.setRunning(running, millis());
+    return true;
   }
+
+  DeviceSettings candidate = settings_;
+  candidate.running = running;
+  if (!running) sequence_.setRunning(false, millis());
+  if (!settings_store_ready_ || !settings_store_.save(candidate)) return false;
+
+  settings_ = candidate;
+  if (running) sequence_.setRunning(true, millis());
+  return true;
 }
 
 void MotorControlApplication::setup() {
@@ -195,7 +199,9 @@ OperationResult MotorControlApplication::setRunning(bool running) {
     return {false, 409, "Sensor angular nao detectado"};
   }
   if (running) stall_fault_ = false;
-  setRunning(running, true);
+  if (!setRunning(running, true)) {
+    return {false, 500, "Falha ao salvar configuracao"};
+  }
   return {true, 200, ""};
 }
 

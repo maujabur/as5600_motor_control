@@ -36,6 +36,16 @@ class SettingsStoreContractTest(unittest.TestCase):
         self.assertIn("DeviceSettings settings_", header)
         self.assertIn("PreferencesSettingsStore settings_store_", header)
 
+    def test_run_endpoint_reports_snapshot_save_failure(self):
+        application = APPLICATION_CPP.read_text(encoding="utf-8")
+        public_handler = application.split(
+            "OperationResult MotorControlApplication::setRunning", 1)[1]
+        public_handler = public_handler.split(
+            "OperationResult MotorControlApplication::manualMove", 1)[0]
+        self.assertIn("if (!setRunning(running, true))", public_handler)
+        self.assertIn('return {false, 500, "Falha ao salvar configuracao"}',
+                      public_handler)
+
 
 if __name__ == "__main__":
     unittest.main()
