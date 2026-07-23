@@ -1,11 +1,11 @@
 #include <Arduino.h>
 
-#include <AngleMath.h>
 #include <AngleSensorManager.h>
 #include <AdrcPositionController.h>
 #include <HBridgeMotorDriver.h>
 #include <MotionCoordinator.h>
 #include <MotionSequenceController.h>
+#include <MotionTelemetry.h>
 #include <NetworkServices.h>
 #include <PreferencesSettingsStore.h>
 #include <WebControlServer.h>
@@ -43,8 +43,6 @@ constexpr uint8_t  MOTOR_B_IN2            = 4;
 
 constexpr uint32_t SERIAL_BAUD            = 115200;
 constexpr uint32_t SERIAL_STARTUP_WAIT_MS = 3000;
-constexpr uint32_t MOVE_RPM_TELEMETRY_WINDOW_MS = 80;
-constexpr uint32_t MOVE_DEBUG_LOG_PERIOD_MS = 2000;
 constexpr uint32_t PWM_DEFAULT_FREQUENCY_HZ = 500;
 constexpr uint32_t PWM_MIN_FREQUENCY_HZ     = 500;
 constexpr uint32_t PWM_MAX_FREQUENCY_HZ     = 20000;
@@ -64,36 +62,11 @@ MotionCoordinator        g_motion_coordinator(
   g_angle_sensor, g_position_servo, g_motor_driver);
 MotionSequenceController g_sequence_motion(g_motion_coordinator);
 bool                     g_run_when_sensor_detected = false;
-bool                    g_move_done_reported = false;
 bool                    g_adrc_stall_fault = false;
-bool                    g_move_tracking_active = false;
-float                   g_move_peak_rpm_abs = 0.0f;
-float                   g_move_peak_rpm_signed = 0.0f;
-float                   g_move_last_rpm_signed = 0.0f;
-float                   g_move_last_nonzero_rpm_signed = 0.0f;
-bool                    g_move_prev_sample_valid = false;
-float                   g_move_prev_deg = 0.0f;
-uint32_t                g_move_prev_ms = 0;
-uint32_t                g_move_start_ms = 0;
-float                   g_move_rpm_sum = 0.0f;
-uint32_t                g_move_rpm_samples = 0;
-float                   g_move_total_abs_delta_deg = 0.0f;
-float                   g_move_total_net_delta_deg = 0.0f;
-float                   g_move_total_progress_deg = 0.0f;
-float                   g_move_start_accumulated_deg = 0.0f;
-bool                    g_move_start_accumulated_captured = false;
-float                   g_move_rpm_window_delta_deg = 0.0f;
-uint32_t                g_move_rpm_window_dt_ms = 0;
-int16_t                 g_move_peak_pwm_adrc_abs = 0;
-int16_t                 g_move_peak_pwm_out_abs = 0;
-float                   g_move_pwm_out_abs_sum = 0.0f;
-uint32_t                g_move_pwm_out_samples = 0;
-uint32_t                g_move_pwm_out_sat_samples = 0;
+MotionTelemetry         g_telemetry;
 uint32_t                g_pwm_frequency_hz = PWM_DEFAULT_FREQUENCY_HZ;
 uint8_t                 g_power_limit_percent = 100;
-uint32_t                g_move_debug_last_print_ms = 0;
 
-float clampf(float v, float lo, float hi);
 bool setPwmFrequencyHz(uint32_t hz);
 
 DeviceSettings g_settings = DeviceSettings::defaults();
@@ -146,24 +119,6 @@ void loadDeviceSettings() {
   applyDeviceSettings(g_settings_store_ready
                         ? g_settings_store.load()
                         : DeviceSettings::defaults());
-}
-
-void saveRepetitiveMotionConfig() {
-  g_settings.sequence = g_sequence_motion.config();
-  saveSettingsSnapshot();
-}
-
-void saveAdrcSettings() {
-  g_settings.position = g_position_servo.settings();
-  saveSettingsSnapshot();
-}
-
-void saveControlSettings() {
-  g_settings.position = g_position_servo.settings();
-  g_settings.sequence = g_sequence_motion.config();
-  g_settings.motor = g_motor_driver.settings();
-  g_settings.sensor.failure_limit = g_angle_sensor.failureLimit();
-  saveSettingsSnapshot();
 }
 
 void setRepetitiveRunning(bool running, bool persist = true) {
@@ -240,8 +195,6 @@ OperationResult MainWebActions::manualMove(const MotionRequest& request) {
   if (!g_motion_coordinator.startMove(request)) {
     return {false, 503, "Falha ao iniciar movimento"};
   }
-  g_move_done_reported = false;
-  g_move_start_ms = millis();
   return {true, 200, ""};
 }
 
@@ -263,15 +216,9 @@ OperationResult MainWebActions::adjustTo(bool startup_position) {
         {step.target_deg, step.rpm, MotionDirection::Shortest})) {
     return {false, 503, "Falha ao iniciar movimento"};
   }
-  g_move_done_reported = false;
-  g_move_start_ms = millis();
   return {true, 200, ""};
 }
 // ─── utilitarios ────────────────────────────────────────────────────────────
-
-float clampf(float v, float lo, float hi) {
-  return v < lo ? lo : (v > hi ? hi : v);
-}
 
 bool setPwmFrequencyHz(uint32_t hz) {
   MotorDriverSettings settings = g_motor_driver.settings();
@@ -283,195 +230,9 @@ bool setPwmFrequencyHz(uint32_t hz) {
   return true;
 }
 
-void updateMotionDiagnostics(uint32_t now_ms) {
-  const MotionStatus& motion = g_motion_coordinator.status();
-  if (motion.paused_for_sensor) return;
-
-  if (!motion.active) {
-    g_move_tracking_active = false;
-    g_move_prev_sample_valid = false;
-    g_move_total_abs_delta_deg = 0.0f;
-    g_move_total_net_delta_deg = 0.0f;
-    g_move_total_progress_deg = 0.0f;
-    g_move_start_accumulated_captured = false;
-    g_move_rpm_window_delta_deg = 0.0f;
-    g_move_rpm_window_dt_ms = 0;
-    g_move_debug_last_print_ms = 0;
-    return;
-  }
-
-  if (!g_move_tracking_active) {
-    g_move_tracking_active = true;
-    g_move_peak_rpm_abs = 0.0f;
-    g_move_peak_rpm_signed = 0.0f;
-    g_move_last_rpm_signed = 0.0f;
-    g_move_last_nonzero_rpm_signed = 0.0f;
-    g_move_rpm_sum = 0.0f;
-    g_move_rpm_samples = 0;
-    g_move_total_abs_delta_deg = 0.0f;
-    g_move_total_net_delta_deg = 0.0f;
-    g_move_total_progress_deg = 0.0f;
-    g_move_start_accumulated_captured = false;
-    g_move_rpm_window_delta_deg = 0.0f;
-    g_move_rpm_window_dt_ms = 0;
-    g_move_peak_pwm_adrc_abs = 0;
-    g_move_peak_pwm_out_abs = 0;
-    g_move_pwm_out_abs_sum = 0.0f;
-    g_move_pwm_out_samples = 0;
-    g_move_pwm_out_sat_samples = 0;
-    g_move_prev_sample_valid = false;
-    g_move_debug_last_print_ms = millis();
-  }
-
-  const float current_deg = motion.angle_deg;
-
-  // Acumula deslocamento angular absoluto para diagnostico de movimentos curtos.
-  if (g_move_prev_sample_valid) {
-    const uint32_t dt_ms = now_ms - g_move_prev_ms;
-    if (dt_ms > 0) {
-      const float delta_deg =
-        AngleMath::shortestDelta(g_move_prev_deg, current_deg);
-      // Para rpm_medio, considera deslocamento quase integral; rejeita apenas glitches grosseiros.
-      if (fabsf(delta_deg) <= 20.0f) {
-        g_move_total_abs_delta_deg += fabsf(delta_deg);
-        g_move_total_net_delta_deg += delta_deg;
-        const float cmd_rpm = g_position_servo.commandedRpm();
-        const float sign = (cmd_rpm >= 0.0f) ? 1.0f : -1.0f;
-        const float projected_progress = sign * delta_deg;
-        if (projected_progress > 0.0f) {
-          g_move_total_progress_deg += projected_progress;
-        }
-      }
-
-      // Nao computa rpm_pico durante KICK para evitar inflar metricas de regime.
-      if (!g_position_servo.isKicking()) {
-        const AdrcPositionSettings& cfg = g_position_servo.settings();
-        // Para rpm_pico, usa filtro dinamico mais estrito.
-        float max_delta_plausible_deg = 3.0f;
-        if (cfg.physical_max_rpm > 0.1f) {
-          const float rpm_guard = cfg.physical_max_rpm * 1.8f;
-          max_delta_plausible_deg = (rpm_guard * 360.0f * (float)dt_ms) / 60000.0f + 0.8f;
-        }
-        // Pico de RPM por janela temporal para reduzir efeito de quantizacao.
-        if (fabsf(delta_deg) <= max_delta_plausible_deg) {
-          g_move_rpm_window_delta_deg += delta_deg;
-          g_move_rpm_window_dt_ms += dt_ms;
-        }
-        if (g_move_rpm_window_dt_ms >= MOVE_RPM_TELEMETRY_WINDOW_MS) {
-          const float rpm_window =
-            (g_move_rpm_window_delta_deg * 60000.0f) / (360.0f * (float)g_move_rpm_window_dt_ms);
-          const float abs_rpm_window = fabsf(rpm_window);
-          float rpm_peak_limit = fmaxf(g_position_servo.maxSpeedRpm() * 2.20f, 1.0f);
-          if (cfg.physical_max_rpm > 0.1f) {
-            rpm_peak_limit = fmaxf(rpm_peak_limit, cfg.physical_max_rpm * 1.40f + 0.20f);
-          }
-          rpm_peak_limit = fminf(rpm_peak_limit, 30.0f);
-
-          if (abs_rpm_window <= rpm_peak_limit) {
-            if (abs_rpm_window > g_move_peak_rpm_abs) {
-              g_move_peak_rpm_abs = abs_rpm_window;
-              g_move_peak_rpm_signed = rpm_window;
-            }
-            if (abs_rpm_window > 0.2f) {
-              g_move_last_nonzero_rpm_signed = rpm_window;
-            }
-          }
-
-          g_move_rpm_window_delta_deg = 0.0f;
-          g_move_rpm_window_dt_ms = 0;
-        }
-      } else {
-        // Reinicia a janela para nao carregar amostras de kick para o pico de regime.
-        g_move_rpm_window_delta_deg = 0.0f;
-        g_move_rpm_window_dt_ms = 0;
-      }
-    }
-  }
-  g_move_prev_deg = current_deg;
-  g_move_prev_ms = now_ms;
-  g_move_prev_sample_valid = true;
-
-  const int16_t pwm_adrc_abs = (int16_t)abs(g_position_servo.pwmOutput());
-  if (pwm_adrc_abs > g_move_peak_pwm_adrc_abs) {
-    g_move_peak_pwm_adrc_abs = pwm_adrc_abs;
-  }
-  const int16_t pwm_out_abs =
-    (int16_t)abs(motion.pwm_percent);
-  if (pwm_out_abs > g_move_peak_pwm_out_abs) {
-    g_move_peak_pwm_out_abs = pwm_out_abs;
-  }
-
-  // Captura posição acumulada inicial (odômetro) na primeira iteração do movimento.
-  if (!g_move_start_accumulated_captured && g_position_servo.isActive()) {
-    g_move_start_accumulated_deg = g_position_servo.accumulatedDeg();
-    g_move_start_accumulated_captured = true;
-  }
-
-  if (g_position_servo.isActive()) {
-    // Mantem RPM instantaneo para debug/diagnostico.
-    g_move_last_rpm_signed = g_position_servo.measuredRpm();
-
-    // Debug periodico sem liberar entrada serial: status reduzido a cada 10s.
-    if (g_move_debug_last_print_ms == 0 || (now_ms - g_move_debug_last_print_ms) >= MOVE_DEBUG_LOG_PERIOD_MS) {
-      g_move_debug_last_print_ms = now_ms;
-      Serial.printf("DBG: move t=%u ms  rpm_inst=%.2f  rpm_raw=%.2f  rpm_cmd=%.2f  erro_rpm=%.2f  pwm=%d%%\n",
-                    now_ms - g_move_start_ms,
-                    g_position_servo.measuredRpm(),
-                    g_position_servo.measuredRpmRaw(),
-                    g_position_servo.commandedRpm(),
-                    g_position_servo.lastVelocityError(),
-                    g_position_servo.pwmOutput());
-    }
-
-    g_move_pwm_out_abs_sum += pwm_out_abs;
-    g_move_pwm_out_samples++;
-    if (pwm_out_abs >= 99.0f) {
-      g_move_pwm_out_sat_samples++;
-    }
-  }
-
-  if (!motion.active && !g_move_done_reported) {
-    g_move_done_reported = true;
-    g_move_tracking_active = false;
-    g_move_prev_sample_valid = false;
-    g_move_debug_last_print_ms = 0;
-    const uint32_t elapsed_ms = millis() - g_move_start_ms;
-    // rpm_medio calculado a partir do odômetro interno do controlador (mais preciso
-    // que acumulação de deltas externos, que perde progressão durante fase STOPPING).
-    const float total_displacement_deg = g_move_start_accumulated_captured
-                                           ? fabsf(g_position_servo.accumulatedDeg() - g_move_start_accumulated_deg)
-                                           : fabsf(g_move_total_net_delta_deg);
-    const float rpm_medio = (elapsed_ms > 0)
-                              ? (total_displacement_deg * 60000.0f) / (360.0f * (float)elapsed_ms)
-                              : 0.0f;
-    if (g_move_peak_rpm_abs < 0.05f && rpm_medio > 0.05f) {
-      const float peak_sign = (g_move_last_nonzero_rpm_signed < 0.0f) ? -1.0f : 1.0f;
-      g_move_peak_rpm_abs = rpm_medio;
-      g_move_peak_rpm_signed = peak_sign * rpm_medio;
-    }
-    const float pwm_adrc_pico_pct = clampf((float)g_move_peak_pwm_adrc_abs, 0.0f, 100.0f);
-    const float pwm_out_pico_pct = (float)g_move_peak_pwm_out_abs;
-    const float pwm_out_medio_pct = (g_move_pwm_out_samples > 0)
-                                       ? (g_move_pwm_out_abs_sum / (float)g_move_pwm_out_samples)
-                                       : 0.0f;
-    const float pwm_out_sat_pct = (g_move_pwm_out_samples > 0)
-                                     ? ((float)g_move_pwm_out_sat_samples * 100.0f / (float)g_move_pwm_out_samples)
-                                     : 0.0f;
-    const float ang_ini = g_move_start_accumulated_captured ? g_move_start_accumulated_deg : 0.0f;
-    const float desl_signed = g_move_start_accumulated_captured
-                                ? (g_position_servo.accumulatedDeg() - g_move_start_accumulated_deg)
-                                : g_move_total_net_delta_deg;
-    const float desl_abs = fabsf(desl_signed);
-    Serial.printf("OK: alvo atingido em %.2f deg (ang_ini=%.2f deg, desl=%.2f deg, desl_abs=%.2f deg, tempo=%u ms, rpm_pico=%.2f, rpm_medio=%.2f, pwm_adrc_pico=%.1f%%, pwm_out_pico=%.1f%%, pwm_out_med=%.1f%%, pwm_sat=%.0f%%)\n",
-                  current_deg, ang_ini, desl_signed, desl_abs, elapsed_ms, g_move_peak_rpm_signed, rpm_medio,
-                  pwm_adrc_pico_pct, pwm_out_pico_pct, pwm_out_medio_pct, pwm_out_sat_pct);
-  }
-}
-
 void stopMotorForOta() {
   g_sequence_motion.stop();
   g_run_when_sensor_detected = false;
-  g_move_tracking_active = false;
   g_motion_coordinator.cancelMove();
 }
 
@@ -529,8 +290,6 @@ void setup() {
 }
 
 void loop() {
-  // Mantem a serial exclusivamente para logs; qualquer entrada e descartada.
-  while (Serial.available() > 0) Serial.read();
   const uint32_t now_ms = millis();
   g_network.update(now_ms);
   g_web_server.handleClient();
@@ -539,9 +298,6 @@ void loop() {
     g_motion_coordinator.consumeRecoveredPauseMs();
   if (recovered_pause_ms > 0) {
     g_sequence_motion.resumeAfterPause(recovered_pause_ms);
-    g_move_prev_sample_valid = false;
-    g_move_rpm_window_delta_deg = 0.0f;
-    g_move_rpm_window_dt_ms = 0;
   }
   if (g_run_when_sensor_detected &&
       g_motion_coordinator.status().sensor_available &&
@@ -559,6 +315,6 @@ void loop() {
     setRepetitiveRunning(false);
     Serial.println("ERRO ADRC: stall detectado; motor e ciclo desativados");
   }
-  updateMotionDiagnostics(now_ms);
+  g_telemetry.update(g_motion_coordinator.status(), now_ms);
 
 }
