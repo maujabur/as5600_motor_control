@@ -3,8 +3,8 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-HEADER_PATH = ROOT / "lib" / "motion_control" / "MotionSequenceController.h"
-SOURCE_PATH = ROOT / "lib" / "motion_control" / "MotionSequenceController.cpp"
+HEADER_PATH = ROOT / "lib" / "sequence" / "MotionSequenceController.h"
+SOURCE_PATH = ROOT / "lib" / "sequence" / "MotionSequenceController.cpp"
 TYPES_PATH = ROOT / "lib" / "domain" / "MotionTypes.h"
 
 
@@ -24,6 +24,7 @@ class SequenceControllerContractTest(unittest.TestCase):
             self.assertIn(name, types)
         for phase in ("STOPPED", "MOVING", "DWELLING"):
             self.assertIn(phase, header)
+        self.assertIn("MotionExecutor& executor_", header)
         self.assertIn("next_step_index_ = 1", source)
         self.assertIn("next_step_index_ > config_.step_count", source)
 

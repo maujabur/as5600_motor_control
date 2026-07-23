@@ -5,8 +5,8 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 ADRC_H = (ROOT / "lib/motion_control/AdrcPositionController.h").read_text(encoding="utf-8")
 ADRC_CPP = (ROOT / "lib/motion_control/AdrcPositionController.cpp").read_text(encoding="utf-8")
-SEQUENCE_H = (ROOT / "lib/motion_control/MotionSequenceController.h").read_text(encoding="utf-8")
-SEQUENCE_CPP = (ROOT / "lib/motion_control/MotionSequenceController.cpp").read_text(encoding="utf-8")
+SEQUENCE_H = (ROOT / "lib/sequence/MotionSequenceController.h").read_text(encoding="utf-8")
+SEQUENCE_CPP = (ROOT / "lib/sequence/MotionSequenceController.cpp").read_text(encoding="utf-8")
 
 
 class SensorRecoveryIntegrationContractTest(unittest.TestCase):
@@ -100,8 +100,7 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
         manager = (ROOT / "lib/motion_control/AngleSensorManager.h").read_text(
             encoding="utf-8")
         self.assertIn("failure_limit_ = 3", manager)
-        for function_name in ("startSequencePositionMove",
-                              "startAutomaticPositionMove"):
+        for function_name in ("startSequencePositionMove",):
             body = main.rsplit(f"void {function_name}", 1)[1]
             body = body.split("\nvoid ", 1)[0]
             self.assertLess(body.index("g_position_servo.startMove"),
@@ -111,45 +110,6 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
             self.assertIn("forceMotorSafeForSensorLoss()", failed_read)
             self.assertIn("return", failed_read)
             self.assertNotIn("setRepetitiveRunning(false)", failed_read)
-
-        automatic = main.rsplit("void startAutomaticPositionMove", 1)[1]
-        automatic = automatic.split("\nvoid ", 1)[0]
-        before_read = automatic.split("readAngleSensorDeg(&current_deg)", 1)[0]
-        self.assertIn("Direction::ByNumericComparison", before_read)
-        self.assertIn("g_pending_numeric_direction =", before_read)
-
-    def test_pending_numeric_direction_is_resolved_only_before_prime(self):
-        main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
-        self.assertIn("g_pending_numeric_direction", main)
-        automatic = main.rsplit("void startAutomaticPositionMove", 1)[1]
-        automatic = automatic.split("\nvoid ", 1)[0]
-        successful_start = automatic.split("readAngleSensorDeg(&current_deg)", 1)[1]
-        self.assertIn("resolvePendingNumericDirection(current_deg)", successful_start)
-        self.assertLess(successful_start.index("resolvePendingNumericDirection(current_deg)"),
-                        successful_start.index("primeAccumulatedAngle(current_deg)"))
-
-        position = main.split("void updatePositionMoveControl()", 1)[1]
-        position = position.split("void updateRampControl()", 1)[0]
-        valid_read = position.split("if (!readAngleSensorDeg(&current_deg))", 1)[1]
-        self.assertIn("resolvePendingNumericDirection(current_deg)", valid_read)
-        self.assertLess(valid_read.index("resolvePendingNumericDirection(current_deg)"),
-                        valid_read.index("computeOutputPercent(current_deg"))
-
-        recovery = main.split("consumeRecoveredEvent(&recovered_angle_deg)", 1)[1]
-        recovery = recovery.split("g_position_servo.resumeAtAngle", 1)[0]
-        self.assertIn("resolvePendingNumericDirection(recovered_angle_deg)", recovery)
-
-        for cancel_name in ("stopMotorForOta", "stopAutomaticPositionMove"):
-            cancel = main.rsplit(f"void {cancel_name}", 1)[1]
-            cancel = cancel.split("\nvoid ", 1)[0]
-            self.assertIn("g_pending_numeric_direction = false", cancel)
-
-        self.assertIn("setPendingDirection(MotionDirection direction)", ADRC_H)
-        setter = ADRC_CPP.split(
-            "bool AdrcPositionController::setPendingDirection", 1)[1]
-        setter = setter.split("void AdrcPositionController::", 1)[0]
-        self.assertIn("!active_ || accumulated_initialized_", setter)
-        self.assertIn("direction_ = direction", setter)
 
     def test_failure_limit_is_persisted_and_validated(self):
         main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")

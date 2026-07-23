@@ -2,33 +2,22 @@
 
 #include <stdint.h>
 
+#include <MotionExecutor.h>
 #include <MotionTypes.h>
 
 class MotionSequenceController {
  public:
-  using StartMoveFn = void (*)(float, float, MotionDirection);
-  using ContinueMoveFn = bool (*)(float, float, MotionDirection);
-  using IsMoveActiveFn = bool (*)();
-  using IsMoveNearTargetFn = bool (*)();
-  using StopMoveFn = void (*)();
-
-  struct Commands {
-    StartMoveFn start_move = nullptr;
-    ContinueMoveFn continue_move = nullptr;
-    IsMoveActiveFn is_move_active = nullptr;
-    IsMoveNearTargetFn is_move_near_target = nullptr;
-    StopMoveFn stop_move = nullptr;
-  };
-
   enum class Phase : uint8_t { STOPPED, MOVING, DWELLING };
 
-  explicit MotionSequenceController(const Commands& commands);
+  explicit MotionSequenceController(MotionExecutor& executor);
+
   void setConfig(const MotionSequenceConfig& config);
   const MotionSequenceConfig& config() const { return config_; }
   void setRunning(bool running, uint32_t now_ms);
   void stop();
   void update(uint32_t now_ms);
   void resumeAfterPause(uint32_t paused_ms);
+
   bool running() const { return running_; }
   Phase phase() const { return phase_; }
   uint8_t currentStep() const { return current_step_index_; }
@@ -36,12 +25,13 @@ class MotionSequenceController {
 
  private:
   const MotionStep& stepAt(uint8_t index) const;
-  void beginStep(uint8_t index, bool from_step_known, uint8_t from_step_index);
+  void beginStep(uint8_t index, bool from_step_known,
+                 uint8_t from_step_index);
   int8_t moveDirectionSignFromTo(uint8_t from_step_index,
                                  uint8_t to_step_index) const;
   void advanceNextStep();
 
-  Commands commands_;
+  MotionExecutor& executor_;
   MotionSequenceConfig config_;
   bool running_ = false;
   Phase phase_ = Phase::STOPPED;

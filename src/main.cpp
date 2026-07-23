@@ -8,8 +8,8 @@
 #include <AngleMath.h>
 #include <AngleSensorManager.h>
 #include <AdrcPositionController.h>
+#include <MotionExecutor.h>
 #include <MotionSequenceController.h>
-#include <RepetitiveMotionController.h>
 
 #include <ctype.h>
 #include <math.h>
@@ -152,7 +152,6 @@ AdrcPositionController   g_position_servo;
 bool                     g_sensor_pause_active = false;
 bool                     g_sensor_loss_active = false;
 uint32_t                 g_sensor_loss_started_ms = 0;
-bool                     g_pending_numeric_direction = false;
 bool                     g_run_when_sensor_detected = false;
 bool                    g_move_done_reported = false;
 bool                    g_adrc_stall_fault = false;
@@ -184,10 +183,6 @@ uint32_t                g_move_pwm_out_sat_samples = 0;
 uint32_t                g_pwm_frequency_hz = PWM_DEFAULT_FREQUENCY_HZ;
 uint32_t                g_move_debug_last_print_ms = 0;
 
-// Adaptadores: a camada de movimento repetitivo conhece apenas estes comandos
-// genericos, sem depender do sensor angular ou do controlador ADRC concreto.
-void startAutomaticPositionMove(
-  float target_deg, float rpm, RepetitiveMotionController::Direction direction);
 void startSequencePositionMove(float target_deg, float rpm, MotionDirection direction);
 bool continueSequencePositionMove(float target_deg, float rpm,
                                   MotionDirection direction);
@@ -197,22 +192,35 @@ void stopAutomaticPositionMove();
 void applyMotorOutput(int16_t signed_pwm);
 void forceMotorSafeForSensorLoss();
 bool readAngleSensorDeg(float* angle_deg);
-void resolvePendingNumericDirection(float current_deg);
 float clampf(float v, float lo, float hi);
 bool setPwmFrequencyHz(uint32_t hz);
 
-RepetitiveMotionController g_repetitive_motion({
-  startAutomaticPositionMove,
-  isAutomaticPositionMoveActive,
-  stopAutomaticPositionMove
-});
-MotionSequenceController g_sequence_motion({
-  startSequencePositionMove,
-  continueSequencePositionMove,
-  isAutomaticPositionMoveActive,
-  isAutomaticPositionMoveNearTarget,
-  stopAutomaticPositionMove
-});
+class MainMotionExecutor final : public MotionExecutor {
+ public:
+  bool startMove(const MotionRequest& request) override {
+    startSequencePositionMove(request.target_deg, request.rpm,
+                              request.direction);
+    return isAutomaticPositionMoveActive();
+  }
+
+  bool retargetMove(const MotionRequest& request) override {
+    return continueSequencePositionMove(request.target_deg, request.rpm,
+                                        request.direction);
+  }
+
+  bool isMoveActive() const override {
+    return isAutomaticPositionMoveActive();
+  }
+
+  bool isMoveNearTarget() const override {
+    return isAutomaticPositionMoveNearTarget();
+  }
+
+  void cancelMove() override { stopAutomaticPositionMove(); }
+};
+
+MainMotionExecutor g_motion_executor;
+MotionSequenceController g_sequence_motion(g_motion_executor);
 
 Preferences g_repetitive_preferences;
 bool g_repetitive_preferences_ready = false;
@@ -278,19 +286,6 @@ void loadRepetitiveMotionPreferences() {
   g_angle_sensor.setFailureLimit((uint8_t)constrain(
     g_repetitive_preferences.getUInt("sensor_fail", 3), 1U, 20U));
 
-  RepetitiveMotionConfig c = g_repetitive_motion.config();
-  c.start_deg = g_repetitive_preferences.getFloat("start_deg", c.start_deg);
-  c.end_deg = g_repetitive_preferences.getFloat("end_deg", c.end_deg);
-  const float max_rpm = g_position_servo.settings().max_target_rpm;
-  c.start_to_end_rpm = clampf(
-    g_repetitive_preferences.getFloat("rpm_out", c.start_to_end_rpm), 0.1f, max_rpm);
-  c.end_to_start_rpm = clampf(
-    g_repetitive_preferences.getFloat("rpm_back", c.end_to_start_rpm), 0.1f, max_rpm);
-  c.dwell_at_start_ms = min(
-    g_repetitive_preferences.getULong("wait_start", c.dwell_at_start_ms), 3600000UL);
-  c.dwell_at_end_ms = min(
-    g_repetitive_preferences.getULong("wait_end", c.dwell_at_end_ms), 3600000UL);
-  g_repetitive_motion.setConfig(c);
   StoredMotionSequence stored{};
   if (g_repetitive_preferences.getBytesLength("sequence") == sizeof(stored) &&
       g_repetitive_preferences.getBytes("sequence", &stored, sizeof(stored)) == sizeof(stored) &&
@@ -300,13 +295,13 @@ void loadRepetitiveMotionPreferences() {
     g_sequence_motion.setConfig(stored.config);
   } else {
     MotionSequenceConfig sequence;
-    sequence.startup_step = {c.start_deg, c.end_to_start_rpm,
-                             c.dwell_at_start_ms, MotionDirection::Shortest};
+    sequence.startup_step = {0.0f, 1.0f, 1000,
+                             MotionDirection::Shortest};
     sequence.step_count = 2;
-    sequence.steps[0] = {c.end_deg, c.start_to_end_rpm,
-                         c.dwell_at_end_ms, MotionDirection::Clockwise};
-    sequence.steps[1] = {c.start_deg, c.end_to_start_rpm,
-                         c.dwell_at_start_ms, MotionDirection::CounterClockwise};
+    sequence.steps[0] = {180.0f, 1.0f, 2000,
+                         MotionDirection::Clockwise};
+    sequence.steps[1] = {0.0f, 1.0f, 1000,
+                         MotionDirection::CounterClockwise};
     g_sequence_motion.setConfig(sequence);
   }
   g_repetitive_run_on_boot = g_repetitive_preferences.getBool("running", false);
@@ -602,10 +597,6 @@ void setupWebControl() {
       return;
     }
 
-    RepetitiveMotionConfig c = g_repetitive_motion.config();
-    c.start_to_end_rpm = fminf(c.start_to_end_rpm, max_rpm);
-    c.end_to_start_rpm = fminf(c.end_to_start_rpm, max_rpm);
-    g_repetitive_motion.setConfig(c);
     MotionSequenceConfig sequence = g_sequence_motion.config();
     sequence.startup_step.rpm = fminf(sequence.startup_step.rpm, max_rpm);
     for (uint8_t i = 0; i < sequence.step_count; ++i) {
@@ -682,15 +673,17 @@ void setupWebControl() {
       sendWebError(400, "Destino ausente");
       return;
     }
-    const RepetitiveMotionConfig& c = g_repetitive_motion.config();
+    const MotionSequenceConfig& sequence = g_sequence_motion.config();
     g_adrc_stall_fault = false;
     const String target = g_web_server.arg("target");
     if (target == "start") {
-      startAutomaticPositionMove(c.start_deg, c.end_to_start_rpm,
-                                  RepetitiveMotionController::Direction::ByNumericComparison);
+      startSequencePositionMove(sequence.startup_step.target_deg,
+                                sequence.startup_step.rpm,
+                                MotionDirection::Shortest);
     } else if (target == "end") {
-      startAutomaticPositionMove(c.end_deg, c.start_to_end_rpm,
-                                  RepetitiveMotionController::Direction::ByNumericComparison);
+      const MotionStep& end_step = sequence.steps[0];
+      startSequencePositionMove(end_step.target_deg, end_step.rpm,
+                                MotionDirection::Shortest);
     } else {
       sendWebError(400, "Destino invalido");
       return;
@@ -753,14 +746,18 @@ void setupWebControl() {
       sendWebError(422, "Valor fora da faixa permitida");
       return;
     }
-    RepetitiveMotionConfig c = g_repetitive_motion.config();
-    c.start_deg = start;
-    c.end_deg = end;
-    c.start_to_end_rpm = rpm_out;
-    c.end_to_start_rpm = rpm_back;
-    c.dwell_at_start_ms = (uint32_t)lroundf(wait_start);
-    c.dwell_at_end_ms = (uint32_t)lroundf(wait_end);
-    g_repetitive_motion.setConfig(c);
+    MotionSequenceConfig sequence = g_sequence_motion.config();
+    sequence.startup_step = {
+      start, rpm_back, (uint32_t)lroundf(wait_start),
+      MotionDirection::Shortest};
+    sequence.step_count = 2;
+    sequence.steps[0] = {
+      end, rpm_out, (uint32_t)lroundf(wait_end),
+      MotionDirection::Clockwise};
+    sequence.steps[1] = {
+      start, rpm_back, (uint32_t)lroundf(wait_start),
+      MotionDirection::CounterClockwise};
+    g_sequence_motion.setConfig(sequence);
     saveRepetitiveMotionConfig();
     sendWebStatus();
   });
@@ -854,17 +851,6 @@ bool readAngleSensorDeg(float* angle_deg) {
   return read_ok;
 }
 
-void resolvePendingNumericDirection(float current_deg) {
-  if (!g_pending_numeric_direction) return;
-  const MotionDirection direction =
-    current_deg < g_position_servo.targetDeg()
-      ? MotionDirection::Clockwise
-      : MotionDirection::CounterClockwise;
-  if (g_position_servo.setPendingDirection(direction)) {
-    g_pending_numeric_direction = false;
-  }
-}
-
 void updateAngleSensorRecovery(uint32_t now_ms) {
   const AngleSensorManager::State previous_sensor_state = g_angle_sensor.state();
   g_angle_sensor.update(now_ms);
@@ -888,7 +874,6 @@ void updateAngleSensorRecovery(uint32_t now_ms) {
     }
     if (g_sensor_pause_active && g_position_servo.isActive() &&
         !g_ota_update_in_progress) {
-      resolvePendingNumericDirection(recovered_angle_deg);
       g_position_servo.resumeAtAngle(recovered_angle_deg, now_ms);
       g_move_prev_sample_valid = false;
       g_move_rpm_window_delta_deg = 0.0f;
@@ -954,8 +939,6 @@ void updatePositionMoveControl() {
 
   float current_deg = 0.0f;
   if (!readAngleSensorDeg(&current_deg)) return;
-  resolvePendingNumericDirection(current_deg);
-
   const uint32_t now_ms = millis();
 
   // Acumula deslocamento angular absoluto para diagnostico de movimentos curtos.
@@ -1174,7 +1157,6 @@ void applyBrakeOutput() {
 
 void stopMotorForOta() {
   g_sequence_motion.stop();
-  g_pending_numeric_direction = false;
   g_sensor_pause_active = false;
   g_sensor_loss_active = false;
   g_run_when_sensor_detected = false;
@@ -1294,39 +1276,8 @@ bool setupStationOrAccessPoint() {
   return setupOtaAccessPoint();
 }
 
-void startAutomaticPositionMove(
-    float target_deg, float rpm, RepetitiveMotionController::Direction direction) {
-  g_pending_numeric_direction =
-    direction == RepetitiveMotionController::Direction::ByNumericComparison;
-  const float limited_rpm = clampf(rpm, 0.1f, g_position_servo.settings().max_target_rpm);
-  MotionDirection adrc_direction =
-    direction == RepetitiveMotionController::Direction::Increasing
-      ? MotionDirection::Clockwise
-      : direction == RepetitiveMotionController::Direction::Decreasing
-        ? MotionDirection::CounterClockwise
-        : MotionDirection::Shortest;
-  g_position_servo.startMove(target_deg, limited_rpm, adrc_direction);
-
-  float current_deg = 0.0f;
-  if (!g_angle_sensor.active() || !readAngleSensorDeg(&current_deg)) {
-    if (!g_angle_sensor.active()) {
-      forceMotorSafeForSensorLoss();
-      Serial.println("Sensor perdido ao iniciar movimento automatico; passo aguardando recuperacao");
-    } else {
-      Serial.println("Falha transitória ao iniciar movimento automatico; passo mantido pendente");
-    }
-    return;
-  }
-
-  resolvePendingNumericDirection(current_deg);
-  g_position_servo.primeAccumulatedAngle(current_deg);
-  g_move_done_reported = false;
-  g_move_start_ms = millis();
-}
-
 void startSequencePositionMove(float target_deg, float rpm,
                                MotionDirection direction) {
-  g_pending_numeric_direction = false;
   MotionDirection servo_direction = MotionDirection::Shortest;
   if (direction == MotionDirection::Clockwise) {
     servo_direction = MotionDirection::Clockwise;
@@ -1354,7 +1305,6 @@ void startSequencePositionMove(float target_deg, float rpm,
 
 bool continueSequencePositionMove(float target_deg, float rpm,
                                   MotionDirection direction) {
-  g_pending_numeric_direction = false;
   MotionDirection servo_direction = MotionDirection::Shortest;
   if (direction == MotionDirection::Clockwise) {
     servo_direction = MotionDirection::Clockwise;
@@ -1382,7 +1332,6 @@ bool isAutomaticPositionMoveNearTarget() {
 
 void stopAutomaticPositionMove() {
   g_position_servo.cancel();
-  g_pending_numeric_direction = false;
   g_sensor_pause_active = false;
   g_sensor_loss_active = false;
   g_run_when_sensor_detected = false;
@@ -1498,8 +1447,7 @@ bool isLongCommand(const char* cmd) {
     "maxrpm","mr","physrpm","pr",
     "drpm","default_rpm",
     "adrc_wc","awc","adrc_wo","awo","adrc_b0","ab0",
-    "run","running","cycle","cstart","cend","rpmout","rpmback",
-    "waitstart","waitend",
+    "run","running",
     nullptr
   };
   for (int i = 0; longs[i]; ++i) {
@@ -1564,15 +1512,15 @@ void printStatus() {
   Serial.printf("Kick(pos): %.1f%% pwm / %ums   Histerese: %u samples\n",
                 s.kick_pwm_percent, s.kick_ms, s.samples_to_stop);
   Serial.printf("Move default: %.2f rpm\n", g_default_move_max_rpm);
-  const RepetitiveMotionConfig& cycle = g_repetitive_motion.config();
+  const MotionSequenceConfig& cycle = g_sequence_motion.config();
   Serial.printf("Ciclo: running=%s  fase=%s\n",
                 g_sequence_motion.running() ? "ON" : "OFF",
                 g_sequence_motion.phaseText());
   Serial.printf("  inicio=%.2f deg  fim=%.2f deg  rpm ida=%.2f  rpm volta=%.2f\n",
-                cycle.start_deg, cycle.end_deg,
-                cycle.start_to_end_rpm, cycle.end_to_start_rpm);
+                cycle.startup_step.target_deg, cycle.steps[0].target_deg,
+                cycle.steps[0].rpm, cycle.startup_step.rpm);
   Serial.printf("  espera inicio=%u ms  espera fim=%u ms\n",
-                cycle.dwell_at_start_ms, cycle.dwell_at_end_ms);
+                cycle.startup_step.dwell_ms, cycle.steps[0].dwell_ms);
 }
 
 void printHelp() {
@@ -1621,12 +1569,8 @@ void printHelp() {
   Serial.println("                              -> suporta multiplas voltas: inc 450 1.8 (1 volta + 90 graus)");
   Serial.println("    qc | cancelmove           -> cancela movimento de posicao");
   Serial.println();
-  Serial.println("  Movimento repetitivo:");
+  Serial.println("  Sequencia automatica:");
   Serial.println("    run | running on|off      -> liga/desliga o ciclo (off para o motor)");
-  Serial.println("    cycle <ini> <fim> <rpm_ida> <rpm_volta> <espera_ini_ms> <espera_fim_ms>");
-  Serial.println("    cstart | cend <deg>       -> configura os pontos");
-  Serial.println("    rpmout | rpmback <rpm>    -> RPM inicio->fim / fim->inicio");
-  Serial.println("    waitstart | waitend <ms>  -> pausa no inicio / no fim");
   Serial.println("  Controle ADRC:");
   Serial.println("    awc | adrc_wc <valor>     -> banda do controlador [30]");
   Serial.println("    awo | adrc_wo <valor>     -> banda do observador [100]");
@@ -1738,63 +1682,6 @@ void parseAndHandleCommand(char* line) {
     } else {
       printErrorAndPrompt("ERRO: use run on|off");
     }
-    return;
-  }
-
-  if (!strcmp(cmd,"cycle")) {
-    char* tokens[6];
-    tokens[0] = nextArg();
-    for (uint8_t i = 1; i < 6; ++i) tokens[i] = strtok_r(nullptr, " \t", &ctx);
-    if (!tokens[0]) {
-      const RepetitiveMotionConfig& c = g_repetitive_motion.config();
-      Serial.printf("OK: cycle %.2f %.2f %.2f %.2f %u %u\n",
-                    c.start_deg, c.end_deg, c.start_to_end_rpm, c.end_to_start_rpm,
-                    c.dwell_at_start_ms, c.dwell_at_end_ms);
-      return;
-    }
-    for (uint8_t i = 1; i < 6; ++i) {
-      if (!tokens[i]) {
-        printErrorAndPrompt("ERRO: use cycle <ini> <fim> <rpm_ida> <rpm_volta> <espera_ini_ms> <espera_fim_ms>");
-        return;
-      }
-    }
-    RepetitiveMotionConfig c = g_repetitive_motion.config();
-    c.start_deg = (float)atof(tokens[0]);
-    c.end_deg = (float)atof(tokens[1]);
-    const float max_rpm = g_position_servo.settings().max_target_rpm;
-    c.start_to_end_rpm = clampf((float)atof(tokens[2]), 0.1f, max_rpm);
-    c.end_to_start_rpm = clampf((float)atof(tokens[3]), 0.1f, max_rpm);
-    c.dwell_at_start_ms = (uint32_t)constrain(atol(tokens[4]), 0L, 3600000L);
-    c.dwell_at_end_ms = (uint32_t)constrain(atol(tokens[5]), 0L, 3600000L);
-    g_repetitive_motion.setConfig(c);
-    saveRepetitiveMotionConfig();
-    Serial.println("OK: ciclo configurado");
-    return;
-  }
-
-  if (!strcmp(cmd,"cstart") || !strcmp(cmd,"cend") ||
-      !strcmp(cmd,"rpmout") || !strcmp(cmd,"rpmback") ||
-      !strcmp(cmd,"waitstart") || !strcmp(cmd,"waitend")) {
-    char* val = nextArg();
-    RepetitiveMotionConfig c = g_repetitive_motion.config();
-    if (!val) {
-      if (!strcmp(cmd,"cstart")) Serial.printf("OK: cstart=%.2f deg\n", c.start_deg);
-      else if (!strcmp(cmd,"cend")) Serial.printf("OK: cend=%.2f deg\n", c.end_deg);
-      else if (!strcmp(cmd,"rpmout")) Serial.printf("OK: rpmout=%.2f rpm\n", c.start_to_end_rpm);
-      else if (!strcmp(cmd,"rpmback")) Serial.printf("OK: rpmback=%.2f rpm\n", c.end_to_start_rpm);
-      else if (!strcmp(cmd,"waitstart")) Serial.printf("OK: waitstart=%u ms\n", c.dwell_at_start_ms);
-      else Serial.printf("OK: waitend=%u ms\n", c.dwell_at_end_ms);
-      return;
-    }
-    if (!strcmp(cmd,"cstart")) c.start_deg = (float)atof(val);
-    else if (!strcmp(cmd,"cend")) c.end_deg = (float)atof(val);
-    else if (!strcmp(cmd,"rpmout")) c.start_to_end_rpm = clampf((float)atof(val), 0.1f, g_position_servo.settings().max_target_rpm);
-    else if (!strcmp(cmd,"rpmback")) c.end_to_start_rpm = clampf((float)atof(val), 0.1f, g_position_servo.settings().max_target_rpm);
-    else if (!strcmp(cmd,"waitstart")) c.dwell_at_start_ms = (uint32_t)constrain(atol(val), 0L, 3600000L);
-    else c.dwell_at_end_ms = (uint32_t)constrain(atol(val), 0L, 3600000L);
-    g_repetitive_motion.setConfig(c);
-    saveRepetitiveMotionConfig();
-    Serial.println("OK: ciclo atualizado");
     return;
   }
 

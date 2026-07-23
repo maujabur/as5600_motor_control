@@ -8,11 +8,12 @@ PAGE = (ROOT / "src" / "repetitive_motion_web_page.h").read_text(encoding="utf-8
 
 
 class SequenceApiContractTest(unittest.TestCase):
-    def test_versioned_sequence_is_persisted_and_legacy_values_are_migrated(self):
+    def test_versioned_sequence_uses_safe_defaults_without_legacy_migration(self):
         self.assertIn("SEQUENCE_STORAGE_VERSION", MAIN)
         self.assertIn('getBytes("sequence"', MAIN)
         self.assertIn('putBytes("sequence"', MAIN)
-        self.assertIn('getFloat("start_deg"', MAIN)
+        self.assertNotIn('getFloat("start_deg"', MAIN)
+        self.assertIn("sequence.startup_step = {0.0f, 1.0f, 1000", MAIN)
         self.assertIn("MotionDirection::Clockwise", MAIN)
         self.assertIn("MotionDirection::CounterClockwise", MAIN)
 
