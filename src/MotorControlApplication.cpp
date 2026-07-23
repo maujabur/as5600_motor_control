@@ -198,10 +198,10 @@ OperationResult MotorControlApplication::setRunning(bool running) {
   if (running && !motion_.status().sensor_available) {
     return {false, 409, "Sensor angular nao detectado"};
   }
-  if (running) stall_fault_ = false;
   if (!setRunning(running, true)) {
     return {false, 500, "Falha ao salvar configuracao"};
   }
+  if (running) stall_fault_ = false;
   return {true, 200, ""};
 }
 

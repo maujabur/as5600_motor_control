@@ -45,6 +45,8 @@ class SettingsStoreContractTest(unittest.TestCase):
         self.assertIn("if (!setRunning(running, true))", public_handler)
         self.assertIn('return {false, 500, "Falha ao salvar configuracao"}',
                       public_handler)
+        self.assertLess(public_handler.index("setRunning(running, true)"),
+                        public_handler.index("stall_fault_ = false"))
 
 
 if __name__ == "__main__":
