@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <ArduinoOTA.h>
-#include <WebServer.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
 
@@ -11,14 +10,12 @@
 #include <MotionCoordinator.h>
 #include <MotionSequenceController.h>
 #include <PreferencesSettingsStore.h>
+#include <WebControlServer.h>
 
 #include <ctype.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
-
-#include "repetitive_motion_web_page.h"
-#include "control_settings_web_page.h"
 
 #if __has_include("wifi_credentials.h")
 #include "wifi_credentials.h"
@@ -118,8 +115,19 @@ bool setPwmFrequencyHz(uint32_t hz);
 DeviceSettings g_settings = DeviceSettings::defaults();
 PreferencesSettingsStore g_settings_store;
 bool g_settings_store_ready = false;
-WebServer g_web_server(80);
-bool g_web_server_started = false;
+
+class MainWebActions final : public WebControlActions {
+ public:
+  ApplicationStatus status() const override;
+  DeviceSettings settings() const override;
+  OperationResult replaceSettings(const DeviceSettings& settings) override;
+  OperationResult setRunning(bool running) override;
+  OperationResult manualMove(const MotionRequest& request) override;
+  OperationResult adjustTo(bool startup_position) override;
+};
+
+MainWebActions g_web_actions;
+WebControlServer g_web_server(80, g_web_actions);
 
 void applyDeviceSettings(const DeviceSettings& settings) {
   g_settings = settings;
@@ -170,416 +178,100 @@ void setRepetitiveRunning(bool running, bool persist = true) {
     saveSettingsSnapshot();
   }
 }
-bool parseWebNumber(const char* name, float* value) {
-  if (!value || !g_web_server.hasArg(name)) return false;
-  const String text = g_web_server.arg(name);
-  char* end = nullptr;
-  const float parsed = strtof(text.c_str(), &end);
-  if (end == text.c_str() || !end || *end != '\0' || !isfinite(parsed)) return false;
-  *value = parsed;
-  return true;
-}
-
-const char* angleSensorStateText(AngleSensorManager::State state) {
-  switch (state) {
-    case AngleSensorManager::State::Active: return "ACTIVE";
-    case AngleSensorManager::State::Lost: return "LOST";
-    case AngleSensorManager::State::Detecting: return "DETECTING";
-  }
-  return "DETECTING";
-}
-
-void sendWebStatus(int status_code = 200) {
+ApplicationStatus MainWebActions::status() const {
   const MotionStatus& motion = g_motion_coordinator.status();
-  const bool sensor_ok = motion.sensor_available;
-  String json;
-  json.reserve(420);
-  json += F("{\"unit\":");
-  json += String(MOTOR_CONTROL_UNIT_NUMBER);
-  json += F(",\"running\":");
-  json += g_sequence_motion.running() ? F("true") : F("false");
-  json += F(",\"moveActive\":");
-  json += g_position_servo.isActive() ? F("true") : F("false");
-  json += F(",\"phase\":\"");
-  json += g_sequence_motion.phaseText();
-  json += F("\",\"step\":");
-  json += String(g_sequence_motion.currentStep());
-  json += F(",\"sensor\":");
-  json += sensor_ok ? F("true") : F("false");
-  json += F(R"json(,"sensorType":")json");
-  json += g_angle_sensor.sensorName();
-  json += F(R"json(","sensorAddress":)json");
-  json += String(g_angle_sensor.sensorAddress());
-  json += F(R"json(,"sensorState":")json");
-  json += angleSensorStateText(g_angle_sensor.state());
-  json += F(R"json(","sensorFailures":)json");
-  json += String(g_angle_sensor.failureCount());
-  json += F(",\"angle\":"); json += String(motion.angle_deg, 2);
-  json += F(",\"maxRpm\":"); json += String(g_position_servo.settings().max_target_rpm, 2);
-  json += F(",\"otaBusy\":");
-  json += g_ota_update_in_progress ? F("true") : F("false");
-  json += F(",\"stall\":");
-  json += g_adrc_stall_fault ? F("true") : F("false");
-  json += '}';
-  g_web_server.send(status_code, "application/json", json);
-}
-
-void sendWebError(int status_code, const char* message) {
-  String json = F("{\"error\":\"");
-  json += message;
-  json += F("\"}");
-  g_web_server.send(status_code, "application/json", json);
-}
-
-void sendWebSettings() {
-  const AdrcPositionSettings& s = g_position_servo.settings();
-  String json;
-  json.reserve(360);
-  json += F("{\"canEdit\":");
-  json += (!g_sequence_motion.running() && !g_position_servo.isActive() &&
-           !g_ota_update_in_progress) ? F("true") : F("false");
-  json += F(",\"wc\":"); json += String(s.control_bandwidth, 2);
-  json += F(",\"wo\":"); json += String(s.observer_bandwidth, 2);
-  json += F(",\"b0\":"); json += String(s.plant_gain, 2);
-  json += F(",\"maxRpm\":"); json += String(s.max_target_rpm, 2);
-  json += F(",\"physRpm\":"); json += String(s.physical_max_rpm, 2);
-  json += F(",\"powerLimit\":"); json += String(g_power_limit_percent);
-  json += F(",\"pwmHz\":"); json += String(g_pwm_frequency_hz);
-  json += F(",\"stopWindow\":"); json += String(s.stop_window_deg, 2);
-  json += F(",\"stopSamples\":"); json += String(s.samples_to_stop);
-  json += F(",\"accelMs\":"); json += String(s.accel_ramp_ms);
-  json += F(",\"decelMs\":"); json += String(s.decel_ramp_ms);
-  json += F(",\"kickPct\":"); json += String(s.kick_pwm_percent, 1);
-  json += F(",\"kickMs\":"); json += String(s.kick_ms);
-  json += F(",\"minPwm\":"); json += String(s.minimum_drive_pwm_percent, 1);
-  json += F(",\"stallMs\":"); json += String(s.stall_timeout_ms);
-  json += F(",\"stallVel\":"); json += String(s.stall_velocity_deg_s, 2);
-  json += F(",\"velWindow\":"); json += String(s.velocity_window_ms);
-  json += F(",\"velSamples\":"); json += String(s.velocity_num_samples);
-  json += F(",\"sensorFailures\":"); json += String(g_angle_sensor.failureLimit());
-  json += '}';
-  g_web_server.send(200, "application/json", json);
-}
-
-const char* motionDirectionText(MotionDirection direction) {
-  switch (direction) {
-    case MotionDirection::Clockwise: return "cw";
-    case MotionDirection::CounterClockwise: return "ccw";
-    case MotionDirection::Shortest: return "shortest";
+  const char* sensor_state = "DETECTING";
+  switch (g_angle_sensor.state()) {
+    case AngleSensorManager::State::Active: sensor_state = "ACTIVE"; break;
+    case AngleSensorManager::State::Lost: sensor_state = "LOST"; break;
+    case AngleSensorManager::State::Detecting: break;
   }
-  return "shortest";
+  ApplicationStatus value;
+  value.unit = MOTOR_CONTROL_UNIT_NUMBER;
+  value.running = g_sequence_motion.running();
+  value.move_active = motion.active;
+  value.phase = g_sequence_motion.phaseText();
+  value.step = g_sequence_motion.currentStep();
+  value.sensor_available = motion.sensor_available;
+  value.sensor_type = g_angle_sensor.sensorName();
+  value.sensor_address = g_angle_sensor.sensorAddress();
+  value.sensor_state = sensor_state;
+  value.sensor_failures = g_angle_sensor.failureCount();
+  value.angle_deg = motion.angle_deg;
+  value.max_rpm = g_position_servo.settings().max_target_rpm;
+  value.ota_busy = g_ota_update_in_progress;
+  value.stalled = g_adrc_stall_fault;
+  return value;
 }
 
-bool parseMotionDirection(const String& text, MotionDirection* direction) {
-  if (!direction) return false;
-  if (text == "shortest") *direction = MotionDirection::Shortest;
-  else if (text == "cw") *direction = MotionDirection::Clockwise;
-  else if (text == "ccw") *direction = MotionDirection::CounterClockwise;
-  else return false;
-  return true;
+DeviceSettings MainWebActions::settings() const {
+  return g_settings;
 }
 
-void appendSequenceStepJson(String& json, const MotionStep& step) {
-  json += F("{\"target\":"); json += String(step.target_deg, 2);
-  json += F(",\"rpm\":"); json += String(step.rpm, 2);
-  json += F(",\"dwell\":"); json += String(step.dwell_ms);
-  json += F(",\"direction\":\""); json += motionDirectionText(step.direction);
-  json += F("\"}");
-}
-
-void sendWebSequence() {
-  const MotionSequenceConfig& config = g_sequence_motion.config();
-  String json;
-  json.reserve(1900);
-  json += F("{\"canEdit\":");
-  json += (!g_sequence_motion.running() && !g_position_servo.isActive() &&
-           !g_ota_update_in_progress) ? F("true") : F("false");
-  json += F(",\"maxRpm\":");
-  json += String(g_position_servo.settings().max_target_rpm, 2);
-  json += F(",\"startup\":");
-  appendSequenceStepJson(json, config.startup_step);
-  json += F(",\"steps\":[");
-  for (uint8_t i = 0; i < config.step_count; ++i) {
-    if (i) json += ',';
-    appendSequenceStepJson(json, config.steps[i]);
+OperationResult MainWebActions::replaceSettings(
+    const DeviceSettings& settings) {
+  if (!validateDeviceSettings(settings)) {
+    return {false, 400, "Configuracao invalida"};
   }
-  json += F("]}");
-  g_web_server.send(200, "application/json", json);
+  if (!g_settings_store_ready || !g_settings_store.save(settings)) {
+    return {false, 500, "Falha ao salvar configuracao"};
+  }
+  applyDeviceSettings(settings);
+  return {true, 200, ""};
 }
 
-bool parseWebSequenceStep(uint8_t index, MotionStep* step) {
-  if (!step) return false;
-  const String prefix = "s" + String(index) + "_";
-  float target = 0.0f, rpm = 0.0f, dwell = 0.0f;
-  if (!parseWebNumber((prefix + "target").c_str(), &target) ||
-      !parseWebNumber((prefix + "rpm").c_str(), &rpm) ||
-      !parseWebNumber((prefix + "dwell").c_str(), &dwell) ||
-      !g_web_server.hasArg(prefix + "direction")) return false;
-  MotionDirection direction;
-  if (!parseMotionDirection(g_web_server.arg(prefix + "direction"), &direction)) return false;
-  const float max_rpm = g_position_servo.settings().max_target_rpm;
-  if (target < 0.0f || target >= 360.0f || rpm < 0.1f || rpm > max_rpm ||
-      dwell < 0.0f || dwell > 3600000.0f) return false;
-  *step = {target, rpm, (uint32_t)lroundf(dwell), direction};
-  return true;
+OperationResult MainWebActions::setRunning(bool running) {
+  if (g_ota_update_in_progress) {
+    return {false, 409, "Atualizacao OTA em andamento"};
+  }
+  if (running && !g_motion_coordinator.status().sensor_available) {
+    return {false, 409, "Sensor angular nao detectado"};
+  }
+  if (running) g_adrc_stall_fault = false;
+  setRepetitiveRunning(running);
+  return {true, 200, ""};
 }
 
-void setupWebControl() {
-  if (g_web_server_started) return;
-
-  g_web_server.on("/", HTTP_GET, []() {
-    g_web_server.send_P(200, "text/html; charset=utf-8", REPETITIVE_MOTION_WEB_PAGE);
-  });
-  g_web_server.on("/settings", HTTP_GET, []() {
-    g_web_server.send_P(200, "text/html; charset=utf-8", CONTROL_SETTINGS_WEB_PAGE);
-  });
-  g_web_server.on("/api/settings", HTTP_GET, []() { sendWebSettings(); });
-  g_web_server.on("/api/settings", HTTP_POST, []() {
-    if (g_sequence_motion.running() || g_position_servo.isActive() ||
-        g_ota_update_in_progress) {
-      sendWebError(409, "Pare o motor antes de alterar os ajustes");
-      return;
-    }
-    float wc, wo, b0, max_rpm, phys_rpm, power_limit, pwm_hz;
-    float stop_window, stop_samples, accel_ms, decel_ms, kick_pct, kick_ms;
-    float min_pwm, stall_ms, stall_vel, vel_window, vel_samples, sensor_failures;
-    if (!parseWebNumber("wc", &wc) || !parseWebNumber("wo", &wo) ||
-        !parseWebNumber("b0", &b0) || !parseWebNumber("maxRpm", &max_rpm) ||
-        !parseWebNumber("physRpm", &phys_rpm) ||
-        !parseWebNumber("powerLimit", &power_limit) ||
-        !parseWebNumber("pwmHz", &pwm_hz) ||
-        !parseWebNumber("stopWindow", &stop_window) ||
-        !parseWebNumber("stopSamples", &stop_samples) ||
-        !parseWebNumber("accelMs", &accel_ms) ||
-        !parseWebNumber("decelMs", &decel_ms) ||
-        !parseWebNumber("kickPct", &kick_pct) ||
-        !parseWebNumber("kickMs", &kick_ms) ||
-        !parseWebNumber("minPwm", &min_pwm) ||
-        !parseWebNumber("stallMs", &stall_ms) ||
-        !parseWebNumber("stallVel", &stall_vel) ||
-        !parseWebNumber("velWindow", &vel_window) ||
-        !parseWebNumber("velSamples", &vel_samples) ||
-        !parseWebNumber("sensorFailures", &sensor_failures)) {
-      sendWebError(400, "Parametros invalidos ou incompletos");
-      return;
-    }
-    if (wc < 1.0f || wc > 100.0f || wo < 1.0f || wo > 300.0f ||
-        b0 < 1.0f || b0 > 2000.0f || max_rpm < 0.1f || max_rpm > 10.0f ||
-        phys_rpm < 0.1f || phys_rpm > 10.0f || max_rpm > phys_rpm ||
-        power_limit < 0.0f || power_limit > 100.0f ||
-        pwm_hz < PWM_MIN_FREQUENCY_HZ || pwm_hz > PWM_MAX_FREQUENCY_HZ ||
-        stop_window < 0.2f || stop_window > 20.0f ||
-        stop_samples < 1.0f || stop_samples > 20.0f ||
-        accel_ms < 50.0f || accel_ms > 2000.0f ||
-        decel_ms < 50.0f || decel_ms > 2000.0f ||
-        kick_pct < 0.0f || kick_pct > 100.0f ||
-        kick_ms < 0.0f || kick_ms > 1000.0f ||
-        min_pwm < 0.0f || min_pwm > 45.0f ||
-        stall_ms < 100.0f || stall_ms > 10000.0f ||
-        stall_vel < 0.1f || stall_vel > 20.0f ||
-        vel_window < 20.0f || vel_window > 1000.0f ||
-        vel_samples < 2.0f || vel_samples > 20.0f ||
-        sensor_failures < 1.0f || sensor_failures > 20.0f ||
-        sensor_failures != floorf(sensor_failures)) {
-      sendWebError(422, "Valor fora da faixa ou RPM maxima acima da RPM fisica");
-      return;
-    }
-
-    AdrcPositionSettings s = g_position_servo.settings();
-    s.control_bandwidth = wc;
-    s.observer_bandwidth = wo;
-    s.plant_gain = b0;
-    s.max_target_rpm = max_rpm;
-    s.physical_max_rpm = phys_rpm;
-    s.stop_window_deg = stop_window;
-    s.samples_to_stop = (uint16_t)lroundf(stop_samples);
-    s.accel_ramp_ms = (uint16_t)lroundf(accel_ms);
-    s.decel_ramp_ms = (uint16_t)lroundf(decel_ms);
-    s.kick_pwm_percent = kick_pct;
-    s.kick_ms = (uint16_t)lroundf(kick_ms);
-    s.minimum_drive_pwm_percent = min_pwm;
-    s.stall_timeout_ms = (uint16_t)lroundf(stall_ms);
-    s.stall_velocity_deg_s = stall_vel;
-    s.velocity_window_ms = (uint16_t)lroundf(vel_window);
-    s.velocity_num_samples = (uint8_t)lroundf(vel_samples);
-    g_position_servo.setSettings(s);
-    g_angle_sensor.setFailureLimit((uint8_t)lroundf(sensor_failures));
-    g_power_limit_percent = (uint8_t)lroundf(power_limit);
-    if (!setPwmFrequencyHz((uint32_t)lroundf(pwm_hz))) {
-      sendWebError(500, "Falha ao aplicar frequencia PWM");
-      return;
-    }
-
-    MotionSequenceConfig sequence = g_sequence_motion.config();
-    sequence.startup_step.rpm = fminf(sequence.startup_step.rpm, max_rpm);
-    for (uint8_t i = 0; i < sequence.step_count; ++i) {
-      sequence.steps[i].rpm = fminf(sequence.steps[i].rpm, max_rpm);
-    }
-    g_sequence_motion.setConfig(sequence);
-    saveRepetitiveMotionConfig();
-    saveControlSettings();
-    sendWebSettings();
-  });
-  g_web_server.on("/api/status", HTTP_GET, []() { sendWebStatus(); });
-  g_web_server.on("/api/sequence", HTTP_GET, []() { sendWebSequence(); });
-  g_web_server.on("/api/sequence", HTTP_POST, []() {
-    if (g_sequence_motion.running() || g_position_servo.isActive() ||
-        g_ota_update_in_progress) {
-      sendWebError(409, "Pare o motor antes de alterar a sequencia");
-      return;
-    }
-    float count_value = 0.0f;
-    if (!parseWebNumber("count", &count_value) || count_value < 1.0f ||
-        count_value > MOTION_SEQUENCE_MAX_STEPS ||
-        count_value != floorf(count_value)) {
-      sendWebError(422, "Quantidade de passos invalida");
-      return;
-    }
-    MotionSequenceConfig candidate;
-    candidate.step_count = (uint8_t)count_value;
-    if (!parseWebSequenceStep(0, &candidate.startup_step)) {
-      sendWebError(422, "Passo inicial invalido");
-      return;
-    }
-    for (uint8_t i = 1; i <= candidate.step_count; ++i) {
-      if (!parseWebSequenceStep(i, &candidate.steps[i - 1])) {
-        sendWebError(422, "Passo do ciclo invalido");
-        return;
-      }
-    }
-    g_sequence_motion.setConfig(candidate);
-    saveRepetitiveMotionConfig();
-    sendWebSequence();
-  });
-  g_web_server.on("/api/run", HTTP_POST, []() {
-    if (!g_web_server.hasArg("running")) {
-      sendWebError(400, "Parametro running ausente");
-      return;
-    }
-    const bool requested = g_web_server.arg("running") == "1";
-    if (requested && g_ota_update_in_progress) {
-      sendWebError(409, "Atualizacao OTA em andamento");
-      return;
-    }
-    if (requested && !g_angle_sensor.active()) {
-      sendWebError(409, "Sensor angular nao detectado");
-      return;
-    }
-    if (requested) g_adrc_stall_fault = false;
-    setRepetitiveRunning(requested);
-    sendWebStatus();
-  });
-  g_web_server.on("/api/adjust", HTTP_POST, []() {
-    if (g_sequence_motion.running() || g_position_servo.isActive()) {
-      sendWebError(409, "Ajuste permitido somente com o motor parado");
-      return;
-    }
-    if (g_ota_update_in_progress) {
-      sendWebError(409, "Atualizacao OTA em andamento");
-      return;
-    }
-    if (!g_angle_sensor.active()) {
-      sendWebError(409, "Sensor angular nao detectado");
-      return;
-    }
-    if (!g_web_server.hasArg("target")) {
-      sendWebError(400, "Destino ausente");
-      return;
-    }
-    const MotionSequenceConfig& sequence = g_sequence_motion.config();
-    g_adrc_stall_fault = false;
-    const String target = g_web_server.arg("target");
-    if (target == "start") {
-      g_motion_coordinator.startMove({
-        sequence.startup_step.target_deg,
-        sequence.startup_step.rpm,
-        MotionDirection::Shortest});
-    } else if (target == "end") {
-      const MotionStep& end_step = sequence.steps[0];
-      g_motion_coordinator.startMove({
-        end_step.target_deg, end_step.rpm, MotionDirection::Shortest});
-    } else {
-      sendWebError(400, "Destino invalido");
-      return;
-    }
-    sendWebStatus();
-  });
-  g_web_server.on("/api/manual-move", HTTP_POST, []() {
-    if (g_sequence_motion.running() || g_position_servo.isActive() ||
-        g_ota_update_in_progress) {
-      sendWebError(409, "Movimento avulso permitido somente com o motor parado");
-      return;
-    }
-    if (!g_angle_sensor.active()) {
-      sendWebError(409, "Sensor angular nao detectado");
-      return;
-    }
-
-    float target_deg = 0.0f;
-    float rpm = 0.0f;
-    if (!parseWebNumber("target", &target_deg) ||
-        !parseWebNumber("rpm", &rpm)) {
-      sendWebError(400, "Destino ou RPM invalido");
-      return;
-    }
-    const float max_rpm = g_position_servo.settings().max_target_rpm;
-    if (target_deg < 0.0f || target_deg >= 360.0f ||
-        rpm < 0.1f || rpm > max_rpm) {
-      sendWebError(422, "Destino ou RPM fora da faixa permitida");
-      return;
-    }
-
-    g_adrc_stall_fault = false;
-    if (!g_motion_coordinator.startMove(
-          {target_deg, rpm, MotionDirection::Shortest})) {
-      sendWebError(503, "Falha ao iniciar movimento");
-      return;
-    }
-    g_move_done_reported = false;
-    g_move_start_ms = millis();
-    sendWebStatus();
-  });
-  g_web_server.on("/api/config", HTTP_POST, []() {
-    float start = 0.0f, end = 0.0f, rpm_out = 0.0f, rpm_back = 0.0f;
-    float wait_start = 0.0f, wait_end = 0.0f;
-    if (!parseWebNumber("start", &start) || !parseWebNumber("end", &end) ||
-        !parseWebNumber("rpmOut", &rpm_out) || !parseWebNumber("rpmBack", &rpm_back) ||
-        !parseWebNumber("waitStart", &wait_start) || !parseWebNumber("waitEnd", &wait_end)) {
-      sendWebError(400, "Parametros invalidos ou incompletos");
-      return;
-    }
-    const float max_rpm = g_position_servo.settings().max_target_rpm;
-    if (start < 0.0f || start >= 360.0f || end < 0.0f || end >= 360.0f ||
-        rpm_out < 0.1f || rpm_out > max_rpm || rpm_back < 0.1f || rpm_back > max_rpm ||
-        wait_start < 0.0f || wait_start > 3600000.0f ||
-        wait_end < 0.0f || wait_end > 3600000.0f) {
-      sendWebError(422, "Valor fora da faixa permitida");
-      return;
-    }
-    MotionSequenceConfig sequence = g_sequence_motion.config();
-    sequence.startup_step = {
-      start, rpm_back, (uint32_t)lroundf(wait_start),
-      MotionDirection::Shortest};
-    sequence.step_count = 2;
-    sequence.steps[0] = {
-      end, rpm_out, (uint32_t)lroundf(wait_end),
-      MotionDirection::Clockwise};
-    sequence.steps[1] = {
-      start, rpm_back, (uint32_t)lroundf(wait_start),
-      MotionDirection::CounterClockwise};
-    g_sequence_motion.setConfig(sequence);
-    saveRepetitiveMotionConfig();
-    sendWebStatus();
-  });
-  g_web_server.onNotFound([]() {
-    g_web_server.sendHeader("Location", "/", true);
-    g_web_server.send(302, "text/plain", "");
-  });
-  g_web_server.begin();
-  g_web_server_started = true;
-  Serial.println("WEB: painel disponivel em http://192.168.4.1/");
+OperationResult MainWebActions::manualMove(const MotionRequest& request) {
+  if (g_sequence_motion.running() || g_position_servo.isActive() ||
+      g_ota_update_in_progress) {
+    return {false, 409,
+            "Movimento avulso permitido somente com o motor parado"};
+  }
+  if (!g_motion_coordinator.status().sensor_available) {
+    return {false, 409, "Sensor angular nao detectado"};
+  }
+  g_adrc_stall_fault = false;
+  if (!g_motion_coordinator.startMove(request)) {
+    return {false, 503, "Falha ao iniciar movimento"};
+  }
+  g_move_done_reported = false;
+  g_move_start_ms = millis();
+  return {true, 200, ""};
 }
 
+OperationResult MainWebActions::adjustTo(bool startup_position) {
+  if (g_sequence_motion.running() || g_position_servo.isActive()) {
+    return {false, 409, "Ajuste permitido somente com o motor parado"};
+  }
+  if (g_ota_update_in_progress) {
+    return {false, 409, "Atualizacao OTA em andamento"};
+  }
+  if (!g_motion_coordinator.status().sensor_available) {
+    return {false, 409, "Sensor angular nao detectado"};
+  }
+  const MotionStep& step = startup_position
+    ? g_settings.sequence.startup_step
+    : g_settings.sequence.steps[0];
+  g_adrc_stall_fault = false;
+  if (!g_motion_coordinator.startMove(
+        {step.target_deg, step.rpm, MotionDirection::Shortest})) {
+    return {false, 503, "Falha ao iniciar movimento"};
+  }
+  g_move_done_reported = false;
+  g_move_start_ms = millis();
+  return {true, 200, ""};
+}
 // ─── utilitarios ────────────────────────────────────────────────────────────
 
 float clampf(float v, float lo, float hi) {
@@ -808,7 +500,7 @@ bool setupOtaAndWebServices() {
                   (unsigned int)error);
   });
   ArduinoOTA.begin();
-  setupWebControl();
+  g_web_server.begin();
 
   return true;
 }
@@ -900,7 +592,7 @@ bool setupStationOrAccessPoint() {
 void handleOtaMaintenanceMode() {
   if (g_ota_mode_active) {
     ArduinoOTA.handle();
-    if (g_web_server_started) g_web_server.handleClient();
+    g_web_server.handleClient();
     return;
   }
 

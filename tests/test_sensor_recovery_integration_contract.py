@@ -101,26 +101,30 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
 
     def test_failure_limit_is_persisted_and_validated(self):
         main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
-        page = (ROOT / "src/control_settings_web_page.h").read_text(encoding="utf-8")
+        page = (ROOT / "lib/web/control_settings_web_page.h").read_text(encoding="utf-8")
         settings = (ROOT / "lib/settings/DeviceSettings.h").read_text(
             encoding="utf-8")
-        for token in ('parseWebNumber("sensorFailures"',
-                      "setFailureLimit((uint8_t)lroundf(sensor_failures))",
-                      "g_settings.sensor.failure_limit"):
-            self.assertIn(token, main)
+        web = (ROOT / "lib/web/WebControlServer.cpp").read_text(encoding="utf-8")
+        for token in ('parseNumber("sensorFailures"',
+                      "candidate.sensor.failure_limit =",
+                      "(uint8_t)lroundf(sensor_failures)"):
+            self.assertIn(token, web)
+        self.assertIn(
+            "g_angle_sensor.setFailureLimit(g_settings.sensor.failure_limit)",
+            main)
         self.assertIn("SensorSettings sensor", settings)
         self.assertIn("value.sensor.failure_limit >= 1", settings)
         self.assertIn('id="sensorFailures"', page)
         self.assertIn("'sensorFailures'", page)
 
     def test_status_api_exposes_sensor_identity_and_state(self):
-        main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
+        web = (ROOT / "lib/web/WebControlServer.cpp").read_text(encoding="utf-8")
         for field in ('"sensorType"', '"sensorAddress"', '"sensorState"',
                       '"sensorFailures"'):
-            self.assertIn(field, main)
+            self.assertIn(field, web.replace('\\"', '"'))
 
     def test_main_page_distinguishes_detection_and_reconnection(self):
-        page = (ROOT / "src/repetitive_motion_web_page.h").read_text(encoding="utf-8")
+        page = (ROOT / "lib/web/repetitive_motion_web_page.h").read_text(encoding="utf-8")
         self.assertIn("DETECTANDO SENSOR", page)
         self.assertIn("RECONECTANDO SENSOR", page)
         self.assertIn("LEITURA INDISPONIVEL", page)
