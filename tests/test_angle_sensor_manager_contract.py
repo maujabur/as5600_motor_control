@@ -3,8 +3,8 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-HEADER = ROOT / "lib/motion_control/AngleSensorManager.h"
-SOURCE = ROOT / "lib/motion_control/AngleSensorManager.cpp"
+HEADER = ROOT / "lib/hardware/AngleSensorManager.h"
+SOURCE = ROOT / "lib/hardware/AngleSensorManager.cpp"
 
 
 class AngleSensorManagerContractTest(unittest.TestCase):

@@ -9,7 +9,7 @@
 #include <AngleSensorManager.h>
 #include <AdrcPositionController.h>
 #include <HBridgeMotorDriver.h>
-#include <MotionExecutor.h>
+#include <MotionCoordinator.h>
 #include <MotionSequenceController.h>
 
 #include <ctype.h>
@@ -79,9 +79,9 @@ AngleSensorManager g_angle_sensor;
 AdrcPositionController   g_position_servo;
 HBridgeMotorDriver       g_motor_driver({
   MOTOR_A_IN1, MOTOR_A_IN2, MOTOR_B_IN1, MOTOR_B_IN2});
-bool                     g_sensor_pause_active = false;
-bool                     g_sensor_loss_active = false;
-uint32_t                 g_sensor_loss_started_ms = 0;
+MotionCoordinator        g_motion_coordinator(
+  g_angle_sensor, g_position_servo, g_motor_driver);
+MotionSequenceController g_sequence_motion(g_motion_coordinator);
 bool                     g_run_when_sensor_detected = false;
 bool                    g_move_done_reported = false;
 bool                    g_adrc_stall_fault = false;
@@ -112,43 +112,8 @@ uint32_t                g_pwm_frequency_hz = PWM_DEFAULT_FREQUENCY_HZ;
 uint8_t                 g_power_limit_percent = 100;
 uint32_t                g_move_debug_last_print_ms = 0;
 
-void startSequencePositionMove(float target_deg, float rpm, MotionDirection direction);
-bool continueSequencePositionMove(float target_deg, float rpm,
-                                  MotionDirection direction);
-bool isAutomaticPositionMoveActive();
-bool isAutomaticPositionMoveNearTarget();
-void stopAutomaticPositionMove();
-void forceMotorSafeForSensorLoss();
-bool readAngleSensorDeg(float* angle_deg);
 float clampf(float v, float lo, float hi);
 bool setPwmFrequencyHz(uint32_t hz);
-
-class MainMotionExecutor final : public MotionExecutor {
- public:
-  bool startMove(const MotionRequest& request) override {
-    startSequencePositionMove(request.target_deg, request.rpm,
-                              request.direction);
-    return isAutomaticPositionMoveActive();
-  }
-
-  bool retargetMove(const MotionRequest& request) override {
-    return continueSequencePositionMove(request.target_deg, request.rpm,
-                                        request.direction);
-  }
-
-  bool isMoveActive() const override {
-    return isAutomaticPositionMoveActive();
-  }
-
-  bool isMoveNearTarget() const override {
-    return isAutomaticPositionMoveNearTarget();
-  }
-
-  void cancelMove() override { stopAutomaticPositionMove(); }
-};
-
-MainMotionExecutor g_motion_executor;
-MotionSequenceController g_sequence_motion(g_motion_executor);
 
 Preferences g_repetitive_preferences;
 bool g_repetitive_preferences_ready = false;
@@ -304,9 +269,8 @@ const char* angleSensorStateText(AngleSensorManager::State state) {
 }
 
 void sendWebStatus(int status_code = 200) {
-  float angle_deg = 0.0f;
-  const bool sensor_ok = g_angle_sensor.active() &&
-                         readAngleSensorDeg(&angle_deg);
+  const MotionStatus& motion = g_motion_coordinator.status();
+  const bool sensor_ok = motion.sensor_available;
   String json;
   json.reserve(420);
   json += F("{\"unit\":");
@@ -329,7 +293,7 @@ void sendWebStatus(int status_code = 200) {
   json += angleSensorStateText(g_angle_sensor.state());
   json += F(R"json(","sensorFailures":)json");
   json += String(g_angle_sensor.failureCount());
-  json += F(",\"angle\":"); json += String(angle_deg, 2);
+  json += F(",\"angle\":"); json += String(motion.angle_deg, 2);
   json += F(",\"maxRpm\":"); json += String(g_position_servo.settings().max_target_rpm, 2);
   json += F(",\"otaBusy\":");
   json += g_ota_update_in_progress ? F("true") : F("false");
@@ -605,13 +569,14 @@ void setupWebControl() {
     g_adrc_stall_fault = false;
     const String target = g_web_server.arg("target");
     if (target == "start") {
-      startSequencePositionMove(sequence.startup_step.target_deg,
-                                sequence.startup_step.rpm,
-                                MotionDirection::Shortest);
+      g_motion_coordinator.startMove({
+        sequence.startup_step.target_deg,
+        sequence.startup_step.rpm,
+        MotionDirection::Shortest});
     } else if (target == "end") {
       const MotionStep& end_step = sequence.steps[0];
-      startSequencePositionMove(end_step.target_deg, end_step.rpm,
-                                MotionDirection::Shortest);
+      g_motion_coordinator.startMove({
+        end_step.target_deg, end_step.rpm, MotionDirection::Shortest});
     } else {
       sendWebError(400, "Destino invalido");
       return;
@@ -643,16 +608,12 @@ void setupWebControl() {
       return;
     }
 
-    float current_deg = 0.0f;
-    if (!readAngleSensorDeg(&current_deg)) {
-      sendWebError(503, "Falha ao ler sensor angular");
+    g_adrc_stall_fault = false;
+    if (!g_motion_coordinator.startMove(
+          {target_deg, rpm, MotionDirection::Shortest})) {
+      sendWebError(503, "Falha ao iniciar movimento");
       return;
     }
-
-    g_adrc_stall_fault = false;
-    g_position_servo.startMove(
-      target_deg, rpm, MotionDirection::Shortest);
-    g_position_servo.primeAccumulatedAngle(current_deg);
     g_move_done_reported = false;
     g_move_start_ms = millis();
     sendWebStatus();
@@ -714,73 +675,11 @@ bool setPwmFrequencyHz(uint32_t hz) {
   return true;
 }
 
-void forceMotorSafeForSensorLoss() {
-  if (!g_sensor_loss_active) {
-    g_sensor_loss_started_ms = millis();
-  }
-  g_sensor_loss_active = true;
-  if (g_position_servo.isActive()) {
-    g_sensor_pause_active = true;
-  }
-  g_motor_driver.stop();
-}
+void updateMotionDiagnostics(uint32_t now_ms) {
+  const MotionStatus& motion = g_motion_coordinator.status();
+  if (motion.paused_for_sensor) return;
 
-bool readAngleSensorDeg(float* angle_deg) {
-  const bool read_ok = g_angle_sensor.readAngleDeg(angle_deg);
-  if (!read_ok && !g_angle_sensor.active()) {
-    forceMotorSafeForSensorLoss();
-  }
-  return read_ok;
-}
-
-void updateAngleSensorRecovery(uint32_t now_ms) {
-  const AngleSensorManager::State previous_sensor_state = g_angle_sensor.state();
-  g_angle_sensor.update(now_ms);
-  if (previous_sensor_state == AngleSensorManager::State::Detecting &&
-      g_angle_sensor.active()) {
-    Serial.printf("%s detectado no endereco 0x%02X\n",
-                  g_angle_sensor.sensorName(), g_angle_sensor.sensorAddress());
-  }
-  if (g_angle_sensor.consumeLostEvent()) {
-    forceMotorSafeForSensorLoss();
-    Serial.printf("Sensor angular perdido apos %u falhas; PWM bloqueado\n",
-                  g_angle_sensor.failureLimit());
-  }
-
-  float recovered_angle_deg = 0.0f;
-  if (g_angle_sensor.consumeRecoveredEvent(&recovered_angle_deg)) {
-    Serial.printf("%s reconectado em 0x%02X\n",
-                  g_angle_sensor.sensorName(), g_angle_sensor.sensorAddress());
-    if (g_sensor_loss_active) {
-      g_sequence_motion.resumeAfterPause(now_ms - g_sensor_loss_started_ms);
-    }
-    if (g_sensor_pause_active && g_position_servo.isActive() &&
-        !g_ota_update_in_progress) {
-      g_position_servo.resumeAtAngle(recovered_angle_deg, now_ms);
-      g_move_prev_sample_valid = false;
-      g_move_rpm_window_delta_deg = 0.0f;
-      g_move_rpm_window_dt_ms = 0;
-    }
-    g_sensor_pause_active = false;
-    g_sensor_loss_active = false;
-  }
-
-  if (g_run_when_sensor_detected && g_angle_sensor.active() &&
-      !g_ota_update_in_progress) {
-    g_run_when_sensor_detected = false;
-    setRepetitiveRunning(true, false);
-    Serial.println("Sensor detectado; iniciando ciclo persistente");
-  }
-}
-
-void updatePositionMoveControl() {
-  if (g_sensor_pause_active ||
-      (g_position_servo.isActive() && !g_angle_sensor.active())) {
-    g_motor_driver.stop();
-    return;
-  }
-
-  if (!g_position_servo.isActive()) {
+  if (!motion.active) {
     g_move_tracking_active = false;
     g_move_prev_sample_valid = false;
     g_move_total_abs_delta_deg = 0.0f;
@@ -816,9 +715,7 @@ void updatePositionMoveControl() {
     g_move_debug_last_print_ms = millis();
   }
 
-  float current_deg = 0.0f;
-  if (!readAngleSensorDeg(&current_deg)) return;
-  const uint32_t now_ms = millis();
+  const float current_deg = motion.angle_deg;
 
   // Acumula deslocamento angular absoluto para diagnostico de movimentos curtos.
   if (g_move_prev_sample_valid) {
@@ -886,22 +783,12 @@ void updatePositionMoveControl() {
   g_move_prev_ms = now_ms;
   g_move_prev_sample_valid = true;
 
-  const bool was_active = g_position_servo.isActive();
-  const float command_pct = g_position_servo.computeOutputPercent(current_deg, now_ms);
-  if (g_position_servo.isStalled()) {
-    g_motor_driver.stop();
-    g_adrc_stall_fault = true;
-    setRepetitiveRunning(false);
-    Serial.println("ERRO ADRC: stall detectado; motor e ciclo desativados");
-    return;
-  }
   const int16_t pwm_adrc_abs = (int16_t)abs(g_position_servo.pwmOutput());
   if (pwm_adrc_abs > g_move_peak_pwm_adrc_abs) {
     g_move_peak_pwm_adrc_abs = pwm_adrc_abs;
   }
-  g_motor_driver.writeSignedPercent(command_pct);
   const int16_t pwm_out_abs =
-    (int16_t)abs(g_motor_driver.lastAppliedPercent());
+    (int16_t)abs(motion.pwm_percent);
   if (pwm_out_abs > g_move_peak_pwm_out_abs) {
     g_move_peak_pwm_out_abs = pwm_out_abs;
   }
@@ -935,7 +822,7 @@ void updatePositionMoveControl() {
     }
   }
 
-  if (was_active && !g_position_servo.isActive() && !g_move_done_reported) {
+  if (!motion.active && !g_move_done_reported) {
     g_move_done_reported = true;
     g_move_tracking_active = false;
     g_move_prev_sample_valid = false;
@@ -975,11 +862,9 @@ void updatePositionMoveControl() {
 
 void stopMotorForOta() {
   g_sequence_motion.stop();
-  g_sensor_pause_active = false;
-  g_sensor_loss_active = false;
   g_run_when_sensor_detected = false;
   g_move_tracking_active = false;
-  g_motor_driver.stop();
+  g_motion_coordinator.cancelMove();
 }
 
 bool setupOtaAndWebServices() {
@@ -1089,68 +974,6 @@ bool setupStationOrAccessPoint() {
   }
 
   return setupOtaAccessPoint();
-}
-
-void startSequencePositionMove(float target_deg, float rpm,
-                               MotionDirection direction) {
-  MotionDirection servo_direction = MotionDirection::Shortest;
-  if (direction == MotionDirection::Clockwise) {
-    servo_direction = MotionDirection::Clockwise;
-  } else if (direction == MotionDirection::CounterClockwise) {
-    servo_direction = MotionDirection::CounterClockwise;
-  }
-  const float limited_rpm = clampf(
-    rpm, 0.1f, g_position_servo.settings().max_target_rpm);
-  g_position_servo.startMove(target_deg, limited_rpm, servo_direction);
-
-  float current_deg = 0.0f;
-  if (!g_angle_sensor.active() || !readAngleSensorDeg(&current_deg)) {
-    if (!g_angle_sensor.active()) {
-      forceMotorSafeForSensorLoss();
-      Serial.println("Sensor perdido ao iniciar passo; movimento aguardando recuperacao");
-    } else {
-      Serial.println("Falha transitória ao iniciar passo; movimento mantido pendente");
-    }
-    return;
-  }
-  g_position_servo.primeAccumulatedAngle(current_deg);
-  g_move_done_reported = false;
-  g_move_start_ms = millis();
-}
-
-bool continueSequencePositionMove(float target_deg, float rpm,
-                                  MotionDirection direction) {
-  MotionDirection servo_direction = MotionDirection::Shortest;
-  if (direction == MotionDirection::Clockwise) {
-    servo_direction = MotionDirection::Clockwise;
-  } else if (direction == MotionDirection::CounterClockwise) {
-    servo_direction = MotionDirection::CounterClockwise;
-  }
-  const float limited_rpm = clampf(
-    rpm, 0.1f, g_position_servo.settings().max_target_rpm);
-  const bool accepted =
-    g_position_servo.retargetMove(target_deg, limited_rpm, servo_direction);
-  if (accepted) {
-    g_move_done_reported = false;
-    g_move_start_ms = millis();
-  }
-  return accepted;
-}
-
-bool isAutomaticPositionMoveActive() {
-  return g_position_servo.isActive();
-}
-
-bool isAutomaticPositionMoveNearTarget() {
-  return g_position_servo.isWithinStopWindow();
-}
-
-void stopAutomaticPositionMove() {
-  g_position_servo.cancel();
-  g_sensor_pause_active = false;
-  g_sensor_loss_active = false;
-  g_run_when_sensor_detected = false;
-  g_motor_driver.stop();
 }
 
 void handleOtaMaintenanceMode() {
@@ -1271,10 +1094,31 @@ void loop() {
   // Mantem a serial exclusivamente para logs; qualquer entrada e descartada.
   while (Serial.available() > 0) Serial.read();
   const uint32_t now_ms = millis();
-  updateAngleSensorRecovery(now_ms);
-  if (!g_sensor_loss_active) {
+  g_motion_coordinator.updateSensor(now_ms);
+  const uint32_t recovered_pause_ms =
+    g_motion_coordinator.consumeRecoveredPauseMs();
+  if (recovered_pause_ms > 0) {
+    g_sequence_motion.resumeAfterPause(recovered_pause_ms);
+    g_move_prev_sample_valid = false;
+    g_move_rpm_window_delta_deg = 0.0f;
+    g_move_rpm_window_dt_ms = 0;
+  }
+  if (g_run_when_sensor_detected &&
+      g_motion_coordinator.status().sensor_available &&
+      !g_ota_update_in_progress) {
+    g_run_when_sensor_detected = false;
+    setRepetitiveRunning(true, false);
+    Serial.println("Sensor detectado; iniciando ciclo persistente");
+  }
+  if (!g_motion_coordinator.status().paused_for_sensor) {
     g_sequence_motion.update(now_ms);
   }
-  updatePositionMoveControl();
+  g_motion_coordinator.updateControl(now_ms);
+  if (g_motion_coordinator.status().stalled && !g_adrc_stall_fault) {
+    g_adrc_stall_fault = true;
+    setRepetitiveRunning(false);
+    Serial.println("ERRO ADRC: stall detectado; motor e ciclo desativados");
+  }
+  updateMotionDiagnostics(now_ms);
 
 }
