@@ -40,7 +40,7 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
     def test_loss_forces_zero_and_recovery_resumes_active_move(self):
         main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
         self.assertIn("consumeLostEvent()", main)
-        self.assertIn("applyMotorOutput(0)", main)
+        self.assertIn("g_motor_driver.stop()", main)
         self.assertIn("g_sensor_pause_active", main)
         self.assertIn("consumeRecoveredEvent(&recovered_angle_deg)", main)
         self.assertIn("resumeAtAngle(recovered_angle_deg, now_ms)", main)
@@ -50,7 +50,7 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
         loop = main.split("void loop()", 1)[1]
         order = [loop.index(token) for token in
                  ("updateAngleSensorRecovery", "g_sequence_motion.update",
-                  "updatePositionMoveControl", "updateRampControl")]
+                  "updatePositionMoveControl")]
         self.assertEqual(order, sorted(order))
 
     def test_sequence_state_is_frozen_only_during_sensor_loss(self):
@@ -79,7 +79,7 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
         self.assertIn("bool readAngleSensorDeg(float* angle_deg)", main)
         self.assertEqual(main.count("g_angle_sensor.readAngleDeg"), 1)
         position = main.split("void updatePositionMoveControl()", 1)[1]
-        position = position.split("void updateRampControl()", 1)[0]
+        position = position.split("void stopMotorForOta()", 1)[0]
         failed_read = position.split(
             "if (!readAngleSensorDeg(&current_deg))", 1)[1]
         failed_read = failed_read.split("const uint32_t now_ms", 1)[0]
@@ -92,7 +92,7 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
         helper = main.split("void forceMotorSafeForSensorLoss()", 1)[1]
         helper = helper.split("void updateAngleSensorRecovery", 1)[0]
         for token in ("g_sensor_pause_active", "g_sensor_loss_active = true",
-                      "g_state.target_percent = 0.0f", "applyMotorOutput(0)"):
+                      "g_motor_driver.stop()"):
             self.assertIn(token, helper)
 
     def test_transient_step_start_failure_keeps_move_and_sequence_pending(self):

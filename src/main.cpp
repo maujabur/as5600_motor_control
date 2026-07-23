@@ -8,6 +8,7 @@
 #include <AngleMath.h>
 #include <AngleSensorManager.h>
 #include <AdrcPositionController.h>
+#include <HBridgeMotorDriver.h>
 #include <MotionExecutor.h>
 #include <MotionSequenceController.h>
 
@@ -55,8 +56,6 @@ constexpr uint8_t  MOTOR_B_IN1            = 3;
 constexpr uint8_t  MOTOR_B_IN2            = 4;
 
 constexpr uint32_t SERIAL_BAUD            = 115200;
-constexpr size_t   SERIAL_LINE_BUFFER     = 96;
-constexpr uint32_t CONTROL_PERIOD_MS      = 2;  // ADRC e saida da ponte a 500 Hz
 constexpr uint32_t SERIAL_STARTUP_WAIT_MS = 3000;
 constexpr uint32_t MOVE_RPM_TELEMETRY_WINDOW_MS = 80;
 constexpr uint32_t MOVE_DEBUG_LOG_PERIOD_MS = 2000;
@@ -71,91 +70,21 @@ constexpr float    DEFAULT_MOVE_MAX_RPM   = 1.8f;
 constexpr float    DEFAULT_MAX_TARGET_RPM = 2.4f;
 float              g_default_move_max_rpm = DEFAULT_MOVE_MAX_RPM;
 
-// ─── enums ──────────────────────────────────────────────────────────────────
-
-enum class MotorSelection { B_IN3_IN4, A_IN1_IN2, BOTH };
-
-// Fases da maquina de controle
-//
-//   IDLE    motor parado, saida = 0
-//           -> KICK quando |target| > tstop e kick_ms > 0
-//           -> RUNNING quando |target| > tstop e kick_ms == 0
-//
-//   KICK    pulso de partida ativo por kick_ms
-//           -> RUNNING ao terminar
-//
-//   RUNNING rampa normal; dead band remapeado na saida PWM
-//           -> IDLE quando |current| cai ate <= tstop
-//              (IDLE relanca KICK se target ainda estiver no lado oposto)
-//
-//   BRAKE   freio eletrico (IN1=IN2=HIGH) por brake_ms
-//           -> IDLE ao terminar
-//
-// Inversao de direcao:
-//   Em RUNNING, quando target muda de sinal, ramp_target = 0.
-//   A rampa desacelera ate tstop -> IDLE -> KICK no novo sentido.
-enum class DrivePhase { IDLE, KICK, RUNNING, BRAKE };
-
-// ─── estado ─────────────────────────────────────────────────────────────────
-
-struct MotorControlState {
-  // Selecao de canal
-  MotorSelection selected_motor = MotorSelection::BOTH;
-
-  // Alvo e valor atual da rampa (assinados, -100..100 %)
-  float  target_percent  = 0.0f;
-  float  current_percent = 0.0f;
-  int8_t direction_sign  = 1;       // usado pelos comandos pwm e dir
-
-  // Rampas
-  uint16_t accel_ms    = 250;
-  uint16_t decel_ms    = 80;
-  float    accel_curve = 1.25f;     // gamma > 1 = mais progressivo no inicio
-  float    decel_curve = 1.0f;
-
-  // Dead band
-  float threshold_start = 20.0f;   // PWM minimo para arrancar do zero (%)
-  float threshold_stop  = 8.0f;    // abaixo disto considera parado (%)
-
-  // Kick de partida / inversao
-  float    kick_pct = 50.0f;       // potencia do pulso (%)
-  uint16_t kick_ms  = 50;         // duracao (ms);  0 = desabilitado
-
-  // Freio eletrico
-  uint16_t brake_ms = 200;         // duracao (ms);  0 = coast imediato
-
-  // Limitador global
-  uint8_t power_limit_percent = 100;
-
-  // Interface serial
-  bool serial_echo_enabled = true;
-
-  // Estado interno da maquina de fases
-  DrivePhase drive_phase    = DrivePhase::IDLE;
-  uint32_t   kick_start_ms  = 0;
-  int8_t     kick_direction = 1;
-  uint32_t   brake_start_ms = 0;
-
-  uint32_t last_control_update_ms = 0;
-};
-
-MotorControlState g_state;
 bool g_ota_mode_active = false;
 bool g_ota_update_in_progress = false;
 bool g_ota_button_pressed = false;
 uint32_t g_ota_button_pressed_ms = 0;
 
-char   g_serial_line[SERIAL_LINE_BUFFER];
-size_t g_serial_index = 0;
 AngleSensorManager g_angle_sensor;
 AdrcPositionController   g_position_servo;
+HBridgeMotorDriver       g_motor_driver({
+  MOTOR_A_IN1, MOTOR_A_IN2, MOTOR_B_IN1, MOTOR_B_IN2});
 bool                     g_sensor_pause_active = false;
 bool                     g_sensor_loss_active = false;
 uint32_t                 g_sensor_loss_started_ms = 0;
 bool                     g_run_when_sensor_detected = false;
 bool                    g_move_done_reported = false;
 bool                    g_adrc_stall_fault = false;
-bool                    g_serial_prompt_pending = true;
 bool                    g_move_tracking_active = false;
 float                   g_move_peak_rpm_abs = 0.0f;
 float                   g_move_peak_rpm_signed = 0.0f;
@@ -174,13 +103,13 @@ float                   g_move_start_accumulated_deg = 0.0f;
 bool                    g_move_start_accumulated_captured = false;
 float                   g_move_rpm_window_delta_deg = 0.0f;
 uint32_t                g_move_rpm_window_dt_ms = 0;
-int16_t                 g_last_applied_pwm_signed = 0;
 int16_t                 g_move_peak_pwm_adrc_abs = 0;
 int16_t                 g_move_peak_pwm_out_abs = 0;
 float                   g_move_pwm_out_abs_sum = 0.0f;
 uint32_t                g_move_pwm_out_samples = 0;
 uint32_t                g_move_pwm_out_sat_samples = 0;
 uint32_t                g_pwm_frequency_hz = PWM_DEFAULT_FREQUENCY_HZ;
+uint8_t                 g_power_limit_percent = 100;
 uint32_t                g_move_debug_last_print_ms = 0;
 
 void startSequencePositionMove(float target_deg, float rpm, MotionDirection direction);
@@ -189,7 +118,6 @@ bool continueSequencePositionMove(float target_deg, float rpm,
 bool isAutomaticPositionMoveActive();
 bool isAutomaticPositionMoveNearTarget();
 void stopAutomaticPositionMove();
-void applyMotorOutput(int16_t signed_pwm);
 void forceMotorSafeForSensorLoss();
 bool readAngleSensorDeg(float* angle_deg);
 float clampf(float v, float lo, float hi);
@@ -278,8 +206,8 @@ void loadRepetitiveMotionPreferences() {
   adrc.velocity_num_samples = (uint8_t)constrain(
     g_repetitive_preferences.getUInt("vel_samples", adrc.velocity_num_samples), 2U, 20U);
   g_position_servo.setSettings(adrc);
-  g_state.power_limit_percent = (uint8_t)constrain(
-    g_repetitive_preferences.getUInt("power_limit", g_state.power_limit_percent), 0U, 100U);
+  g_power_limit_percent = (uint8_t)constrain(
+    g_repetitive_preferences.getUInt("power_limit", g_power_limit_percent), 0U, 100U);
   g_pwm_frequency_hz = constrain(
     g_repetitive_preferences.getUInt("pwm_hz", g_pwm_frequency_hz),
     PWM_MIN_FREQUENCY_HZ, PWM_MAX_FREQUENCY_HZ);
@@ -342,7 +270,7 @@ void saveControlSettings() {
   g_repetitive_preferences.putFloat("stall_vel", s.stall_velocity_deg_s);
   g_repetitive_preferences.putUInt("vel_win", s.velocity_window_ms);
   g_repetitive_preferences.putUInt("vel_samples", s.velocity_num_samples);
-  g_repetitive_preferences.putUInt("power_limit", g_state.power_limit_percent);
+  g_repetitive_preferences.putUInt("power_limit", g_power_limit_percent);
   g_repetitive_preferences.putUInt("pwm_hz", g_pwm_frequency_hz);
   g_repetitive_preferences.putUInt("sensor_fail", g_angle_sensor.failureLimit());
 }
@@ -430,7 +358,7 @@ void sendWebSettings() {
   json += F(",\"b0\":"); json += String(s.plant_gain, 2);
   json += F(",\"maxRpm\":"); json += String(s.max_target_rpm, 2);
   json += F(",\"physRpm\":"); json += String(s.physical_max_rpm, 2);
-  json += F(",\"powerLimit\":"); json += String(g_state.power_limit_percent);
+  json += F(",\"powerLimit\":"); json += String(g_power_limit_percent);
   json += F(",\"pwmHz\":"); json += String(g_pwm_frequency_hz);
   json += F(",\"stopWindow\":"); json += String(s.stop_window_deg, 2);
   json += F(",\"stopSamples\":"); json += String(s.samples_to_stop);
@@ -591,7 +519,7 @@ void setupWebControl() {
     s.velocity_num_samples = (uint8_t)lroundf(vel_samples);
     g_position_servo.setSettings(s);
     g_angle_sensor.setFailureLimit((uint8_t)lroundf(sensor_failures));
-    g_state.power_limit_percent = (uint8_t)lroundf(power_limit);
+    g_power_limit_percent = (uint8_t)lroundf(power_limit);
     if (!setPwmFrequencyHz((uint32_t)lroundf(pwm_hz))) {
       sendWebError(500, "Falha ao aplicar frequencia PWM");
       return;
@@ -776,55 +704,12 @@ float clampf(float v, float lo, float hi) {
   return v < lo ? lo : (v > hi ? hi : v);
 }
 
-float signedPercentToLimitedPercent(float pct, uint8_t limit) {
-  return clampf(pct * ((float)limit / 100.0f), -100.0f, 100.0f);
-}
-
-uint8_t percentToPwm(float pct_abs) {
-  return (uint8_t)roundf(clampf(pct_abs * 255.0f / 100.0f, 0.0f, 255.0f));
-}
-
-void setPwmOutputFrequency(uint8_t pin, uint32_t hz) {
-#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-  analogWriteFrequency(pin, hz);
-#else
-  (void)pin;
-  analogWriteFrequency(hz);
-#endif
-}
-
-void setPwmOutputResolution(uint8_t pin, uint8_t bits) {
-#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-  analogWriteResolution(pin, bits);
-#else
-  (void)pin;
-  analogWriteResolution(bits);
-#endif
-}
-
-void configurePwmOutputs(uint32_t hz, uint8_t bits) {
-  const uint8_t pins[] = {MOTOR_A_IN1, MOTOR_A_IN2, MOTOR_B_IN1, MOTOR_B_IN2};
-  for (uint8_t pin : pins) {
-    setPwmOutputFrequency(pin, hz);
-    setPwmOutputResolution(pin, bits);
-  }
-}
-
-// Remapeia [tstop..100] -> [tstart..100].
-// Abaixo de tstop retorna 0 (dead band: motor nao recebe tensao).
-float applyDeadBandRemap(float abs_pct, float tstart, float tstop) {
-  if (abs_pct <= tstop) return 0.0f;
-  return tstart + (abs_pct - tstop) * (100.0f - tstart) / (100.0f - tstop);
-}
-
 bool setPwmFrequencyHz(uint32_t hz) {
-  if (hz < PWM_MIN_FREQUENCY_HZ || hz > PWM_MAX_FREQUENCY_HZ) {
-    return false;
-  }
-  const uint8_t pins[] = {MOTOR_A_IN1, MOTOR_A_IN2, MOTOR_B_IN1, MOTOR_B_IN2};
-  for (uint8_t pin : pins) {
-    setPwmOutputFrequency(pin, hz);
-  }
+  MotorDriverSettings settings = g_motor_driver.settings();
+  settings.pwm_frequency_hz = hz;
+  settings.pwm_resolution_bits = PWM_RESOLUTION_BITS;
+  settings.power_limit_percent = g_power_limit_percent;
+  if (!g_motor_driver.setSettings(settings)) return false;
   g_pwm_frequency_hz = hz;
   return true;
 }
@@ -837,10 +722,7 @@ void forceMotorSafeForSensorLoss() {
   if (g_position_servo.isActive()) {
     g_sensor_pause_active = true;
   }
-  g_state.target_percent = 0.0f;
-  g_state.current_percent = 0.0f;
-  g_state.drive_phase = DrivePhase::IDLE;
-  applyMotorOutput(0);
+  g_motor_driver.stop();
 }
 
 bool readAngleSensorDeg(float* angle_deg) {
@@ -894,10 +776,7 @@ void updateAngleSensorRecovery(uint32_t now_ms) {
 void updatePositionMoveControl() {
   if (g_sensor_pause_active ||
       (g_position_servo.isActive() && !g_angle_sensor.active())) {
-    g_state.target_percent = 0.0f;
-    g_state.current_percent = 0.0f;
-    g_state.drive_phase = DrivePhase::IDLE;
-    applyMotorOutput(0);
+    g_motor_driver.stop();
     return;
   }
 
@@ -1010,6 +889,7 @@ void updatePositionMoveControl() {
   const bool was_active = g_position_servo.isActive();
   const float command_pct = g_position_servo.computeOutputPercent(current_deg, now_ms);
   if (g_position_servo.isStalled()) {
+    g_motor_driver.stop();
     g_adrc_stall_fault = true;
     setRepetitiveRunning(false);
     Serial.println("ERRO ADRC: stall detectado; motor e ciclo desativados");
@@ -1018,6 +898,12 @@ void updatePositionMoveControl() {
   const int16_t pwm_adrc_abs = (int16_t)abs(g_position_servo.pwmOutput());
   if (pwm_adrc_abs > g_move_peak_pwm_adrc_abs) {
     g_move_peak_pwm_adrc_abs = pwm_adrc_abs;
+  }
+  g_motor_driver.writeSignedPercent(command_pct);
+  const int16_t pwm_out_abs =
+    (int16_t)abs(g_motor_driver.lastAppliedPercent());
+  if (pwm_out_abs > g_move_peak_pwm_out_abs) {
+    g_move_peak_pwm_out_abs = pwm_out_abs;
   }
 
   // Captura posição acumulada inicial (odômetro) na primeira iteração do movimento.
@@ -1042,23 +928,18 @@ void updatePositionMoveControl() {
                     g_position_servo.pwmOutput());
     }
 
-    const float pwm_out_abs = (float)abs(g_last_applied_pwm_signed);
     g_move_pwm_out_abs_sum += pwm_out_abs;
     g_move_pwm_out_samples++;
-    if (pwm_out_abs >= 250.0f) {
+    if (pwm_out_abs >= 99.0f) {
       g_move_pwm_out_sat_samples++;
     }
   }
-  g_state.target_percent = command_pct;
-  if (command_pct > 0.01f) g_state.direction_sign = 1;
-  if (command_pct < -0.01f) g_state.direction_sign = -1;
 
   if (was_active && !g_position_servo.isActive() && !g_move_done_reported) {
     g_move_done_reported = true;
     g_move_tracking_active = false;
     g_move_prev_sample_valid = false;
     g_move_debug_last_print_ms = 0;
-    g_serial_prompt_pending = true;
     const uint32_t elapsed_ms = millis() - g_move_start_ms;
     // rpm_medio calculado a partir do odômetro interno do controlador (mais preciso
     // que acumulação de deltas externos, que perde progressão durante fase STOPPING).
@@ -1074,9 +955,9 @@ void updatePositionMoveControl() {
       g_move_peak_rpm_signed = peak_sign * rpm_medio;
     }
     const float pwm_adrc_pico_pct = clampf((float)g_move_peak_pwm_adrc_abs, 0.0f, 100.0f);
-    const float pwm_out_pico_pct = ((float)g_move_peak_pwm_out_abs * 100.0f) / 255.0f;
+    const float pwm_out_pico_pct = (float)g_move_peak_pwm_out_abs;
     const float pwm_out_medio_pct = (g_move_pwm_out_samples > 0)
-                                       ? ((g_move_pwm_out_abs_sum / (float)g_move_pwm_out_samples) * 100.0f / 255.0f)
+                                       ? (g_move_pwm_out_abs_sum / (float)g_move_pwm_out_samples)
                                        : 0.0f;
     const float pwm_out_sat_pct = (g_move_pwm_out_samples > 0)
                                      ? ((float)g_move_pwm_out_sat_samples * 100.0f / (float)g_move_pwm_out_samples)
@@ -1092,79 +973,13 @@ void updatePositionMoveControl() {
   }
 }
 
-// ─── saida para os pinos ────────────────────────────────────────────────────
-
-void setMotorSignedPwm(int16_t signed_pwm, uint8_t in1, uint8_t in2) {
-  const int16_t v = (int16_t)abs(signed_pwm);
-  if (v == 0) {
-    analogWrite(in1, 0);
-    analogWrite(in2, 0);
-  } else if (signed_pwm > 0) {
-    analogWrite(in1, v);
-    analogWrite(in2, 0);
-  } else {
-    analogWrite(in1, 0);
-    analogWrite(in2, v);
-  }
-}
-
-// L298N: IN1=IN2=HIGH -> curto-circuito na bobina -> freio regenerativo
-void setBrakeChannelPins(uint8_t in1, uint8_t in2) {
-  analogWrite(in1, 255);
-  analogWrite(in2, 255);
-}
-
-void applyMotorOutput(int16_t signed_pwm) {
-  g_last_applied_pwm_signed = signed_pwm;
-  if (g_move_tracking_active) {
-    const int16_t pwm_out_abs = (int16_t)abs(signed_pwm);
-    if (pwm_out_abs > g_move_peak_pwm_out_abs) {
-      g_move_peak_pwm_out_abs = pwm_out_abs;
-    }
-  }
-  switch (g_state.selected_motor) {
-    case MotorSelection::B_IN3_IN4:
-      setMotorSignedPwm(signed_pwm, MOTOR_B_IN1, MOTOR_B_IN2);
-      setMotorSignedPwm(0,          MOTOR_A_IN1, MOTOR_A_IN2);
-      break;
-    case MotorSelection::A_IN1_IN2:
-      setMotorSignedPwm(signed_pwm, MOTOR_A_IN1, MOTOR_A_IN2);
-      setMotorSignedPwm(0,          MOTOR_B_IN1, MOTOR_B_IN2);
-      break;
-    case MotorSelection::BOTH:
-      setMotorSignedPwm(signed_pwm, MOTOR_A_IN1, MOTOR_A_IN2);
-      setMotorSignedPwm(signed_pwm, MOTOR_B_IN1, MOTOR_B_IN2);
-      break;
-  }
-}
-
-void applyBrakeOutput() {
-  switch (g_state.selected_motor) {
-    case MotorSelection::B_IN3_IN4:
-      setBrakeChannelPins(MOTOR_B_IN1, MOTOR_B_IN2);
-      setMotorSignedPwm(0, MOTOR_A_IN1, MOTOR_A_IN2);
-      break;
-    case MotorSelection::A_IN1_IN2:
-      setBrakeChannelPins(MOTOR_A_IN1, MOTOR_A_IN2);
-      setMotorSignedPwm(0, MOTOR_B_IN1, MOTOR_B_IN2);
-      break;
-    case MotorSelection::BOTH:
-      setBrakeChannelPins(MOTOR_A_IN1, MOTOR_A_IN2);
-      setBrakeChannelPins(MOTOR_B_IN1, MOTOR_B_IN2);
-      break;
-  }
-}
-
 void stopMotorForOta() {
   g_sequence_motion.stop();
   g_sensor_pause_active = false;
   g_sensor_loss_active = false;
   g_run_when_sensor_detected = false;
   g_move_tracking_active = false;
-  g_state.target_percent = 0.0f;
-  g_state.current_percent = 0.0f;
-  g_state.drive_phase = DrivePhase::IDLE;
-  applyMotorOutput(0);
+  g_motor_driver.stop();
 }
 
 bool setupOtaAndWebServices() {
@@ -1335,10 +1150,7 @@ void stopAutomaticPositionMove() {
   g_sensor_pause_active = false;
   g_sensor_loss_active = false;
   g_run_when_sensor_detected = false;
-  g_state.target_percent = 0.0f;
-  g_state.current_percent = 0.0f;
-  g_state.drive_phase = DrivePhase::IDLE;
-  applyMotorOutput(0);
+  g_motor_driver.stop();
 }
 
 void handleOtaMaintenanceMode() {
@@ -1374,1090 +1186,18 @@ void handleOtaMaintenanceMode() {
 
 // ─── texto de estado ────────────────────────────────────────────────────────
 
-const char* selectedMotorText() {
-  switch (g_state.selected_motor) {
-    case MotorSelection::B_IN3_IN4: return "IN3/IN4";
-    case MotorSelection::A_IN1_IN2: return "IN1/IN2";
-    case MotorSelection::BOTH:      return "BOTH";
-  }
-  return "IN3/IN4";
-}
-
-const char* drivePhaseText() {
-  switch (g_state.drive_phase) {
-    case DrivePhase::IDLE:    return "IDLE";
-    case DrivePhase::KICK:    return "KICK";
-    case DrivePhase::RUNNING: return "RUNNING";
-    case DrivePhase::BRAKE:   return "BRAKE";
-  }
-  return "IDLE";
-}
-
-// ─── selecao de motor ───────────────────────────────────────────────────────
-
-void selectMotor(MotorSelection motor) {
-  g_state.selected_motor = motor;
-}
-
-bool parseMotorToken(const char* val, MotorSelection* out) {
-  if (!val || !out) return false;
-  if (!strcmp(val,"in3") || !strcmp(val,"in3/in4") || !strcmp(val,"b")) {
-    *out = MotorSelection::B_IN3_IN4; return true;
-  }
-  if (!strcmp(val,"in1") || !strcmp(val,"in1/in2") || !strcmp(val,"a")) {
-    *out = MotorSelection::A_IN1_IN2; return true;
-  }
-  if (!strcmp(val,"both") || !strcmp(val,"all")) {
-    *out = MotorSelection::BOTH; return true;
-  }
-  return false;
-}
-
-void printMotorOk() {
-  switch (g_state.selected_motor) {
-    case MotorSelection::B_IN3_IN4: Serial.println("OK: motor IN3/IN4"); break;
-    case MotorSelection::A_IN1_IN2: Serial.println("OK: motor IN1/IN2"); break;
-    case MotorSelection::BOTH:      Serial.println("OK: motor BOTH");    break;
-  }
-}
-
-// ─── interface serial ────────────────────────────────────────────────────────
-
-void printPrompt() { Serial.print("> "); }
-void printErrorAndPrompt(const char* message) {
-  Serial.println(message);
-  g_serial_prompt_pending = true;
-}
-
-// Comandos com mais de 1 char que NAO devem sofrer expansao compacta.
-// Ex: "kp" comeca com 'k'; sem protecao viraria cmd="k" value="p".
-bool isLongCommand(const char* cmd) {
-  const char* longs[] = {
-    "help","status","stop","pwm","set","rev","dir",
-    "pwmf","pf",
-    "motor","accel","decel","curve","limit","echo",
-    "motora","motorb","motorboth",
-    "tstart","tstop","kick","kickp","brake","brakems",
-    "mm","kp","bm",
-    "goto","go","move","cancelmove","qc",
-    "cw","ccw",
-    "inc","dec",
-    "poswin","pw","accel_pos","ap","decel_pos","dp",
-    "kick_pwm","kpp","kick_rpm","krp","kick_ms","kms","samples_to_stop","sts",
-    "maxrpm","mr","physrpm","pr",
-    "drpm","default_rpm",
-    "adrc_wc","awc","adrc_wo","awo","adrc_b0","ab0",
-    "run","running",
-    nullptr
-  };
-  for (int i = 0; longs[i]; ++i) {
-    if (!strcmp(cmd, longs[i])) return true;
-  }
-  return false;
-}
-
-void printStatus() {
-  Serial.println("\n=== STATUS ===");
-  Serial.printf("Motor: %-8s  Fase: %s\n",
-                selectedMotorText(), drivePhaseText());
-  Serial.printf("Target: %6.1f%%  Atual: %6.1f%%  Dir: %s\n",
-                g_state.target_percent,
-                g_state.current_percent,
-                g_state.direction_sign > 0 ? "FWD" : "REV");
-  Serial.println();
-  Serial.printf("Rampas:  acc=%ums  dec=%ums\n",
-                g_state.accel_ms, g_state.decel_ms);
-  Serial.printf("Curvas:  acc=%.2f  dec=%.2f\n",
-                g_state.accel_curve, g_state.decel_curve);
-  Serial.println();
-  Serial.printf("DeadBand: start=%.0f%%  stop=%.0f%%\n",
-                g_state.threshold_start, g_state.threshold_stop);
-  Serial.printf("Kick:     %.0f%% / %ums%s\n",
-                g_state.kick_pct, g_state.kick_ms,
-                g_state.kick_ms == 0 ? "  (desabilitado)" : "");
-  Serial.printf("Freio:    %ums%s\n",
-                g_state.brake_ms,
-                g_state.brake_ms == 0 ? "  (coast)" : "");
-  Serial.println();
-  Serial.printf("Limite: %u%%   Echo: %s\n",
-                g_state.power_limit_percent,
-                g_state.serial_echo_enabled ? "ON" : "OFF");
-  Serial.printf("PWM: freq=%u Hz  resolucao=%u bits\n",
-                g_pwm_frequency_hz,
-                PWM_RESOLUTION_BITS);
-  Serial.printf("Sensor angular: %s (%s, 0x%02X)\n",
-                g_angle_sensor.active() ? "detectado" : "nao detectado",
-                g_angle_sensor.sensorName(), g_angle_sensor.sensorAddress());
-
-  if (g_position_servo.isActive()) {
-    Serial.printf("Move: ON  alvo=%.2f deg  vmax=%.2f rpm  erro_pos=%.2f deg\n",
-                  g_position_servo.targetDeg(),
-                  g_position_servo.maxSpeedRpm(),
-                  g_position_servo.lastErrorDeg());
-    Serial.printf("  rpm_cmd=%.2f  rpm_real=%.2f  erro_rpm=%.2f  pwm=%d%%\n",
-                  g_position_servo.commandedRpm(),
-                  g_position_servo.measuredRpm(),
-                  g_position_servo.lastVelocityError(),
-                  g_position_servo.pwmOutput());
-  } else {
-    Serial.println("Move: OFF");
-  }
-
-  const AdrcPositionSettings& s = g_position_servo.settings();
-  Serial.printf("ADRC: rated=%.2f rpm  phys=%.2f rpm  stop_win=%.2f deg\n",
-                s.max_target_rpm, s.physical_max_rpm, s.stop_window_deg);
-  Serial.printf("ADRC: wc=%.2f  wo=%.2f  b0=%.2f\n",
-                s.control_bandwidth, s.observer_bandwidth, s.plant_gain);
-  Serial.printf("Rampa: accel=%ums  decel=%ums\n", s.accel_ramp_ms, s.decel_ramp_ms);
-  Serial.printf("Kick(pos): %.1f%% pwm / %ums   Histerese: %u samples\n",
-                s.kick_pwm_percent, s.kick_ms, s.samples_to_stop);
-  Serial.printf("Move default: %.2f rpm\n", g_default_move_max_rpm);
-  const MotionSequenceConfig& cycle = g_sequence_motion.config();
-  Serial.printf("Ciclo: running=%s  fase=%s\n",
-                g_sequence_motion.running() ? "ON" : "OFF",
-                g_sequence_motion.phaseText());
-  Serial.printf("  inicio=%.2f deg  fim=%.2f deg  rpm ida=%.2f  rpm volta=%.2f\n",
-                cycle.startup_step.target_deg, cycle.steps[0].target_deg,
-                cycle.steps[0].rpm, cycle.startup_step.rpm);
-  Serial.printf("  espera inicio=%u ms  espera fim=%u ms\n",
-                cycle.startup_step.dwell_ms, cycle.steps[0].dwell_ms);
-}
-
-void printHelp() {
-  Serial.println("\n  Ajuda / estado:");
-  Serial.println("    help | h | ?              -> ajuda");
-  Serial.println("    status | s                -> estado atual");
-  Serial.println();
-  Serial.println("  Controle:");
-  Serial.println("    pwm | p <0..100>          -> PWM % usando direcao atual");
-  Serial.println("    pwmf| pf [1000..20000]    -> freq PWM (DRV8733: 3k..12k tipico)");
-  Serial.println("    set | v <-100..100>       -> velocidade assinada");
-  Serial.println("    stop | x                  -> corta saida imediatamente");
-  Serial.println("    brake | b                 -> freio eletrico imediato");
-  Serial.println("    rev | r                   -> inverte direcao");
-  Serial.println("    dir | d f|r               -> define direcao manual");
-  Serial.println();
-  Serial.println("  Canal do motor:");
-  Serial.println("    motor | m in3|in1|both");
-  Serial.println("    ma | motora               -> IN1/IN2");
-  Serial.println("    mb | motorb               -> IN3/IN4 (padrao)");
-  Serial.println("    mm | motorboth            -> ambos");
-  Serial.println();
-  Serial.println("  Rampas:");
-  Serial.println("    accel | a <ms>            -> tempo aceleracao      [250ms]");
-  Serial.println("    decel | z <ms>            -> tempo desaceleracao   [80ms]");
-  Serial.println("    curve | c <acc> <dec>     -> curva gamma           [1.25 / 1.0]");
-  Serial.println();
-  Serial.println("  Dead band / kick / freio / limite:");
-  Serial.println("    tstart | ts <0..50>       -> PWM minimo de partida [20%]");
-  Serial.println("    tstop  | tp <0..50>       -> threshold de parada   [8%]");
-  Serial.println("    kick   | k  <ms>          -> duracao kick (0=off)  [100ms]");
-  Serial.println("    kickp  | kp <0..100>      -> potencia kick         [85%]");
-  Serial.println("    brakems| bm <ms>          -> duracao freio (0=coast)[200ms]");
-  Serial.println("    limit  | l  <0..100>      -> limite de potencia    [100%]");
-  Serial.println();
-  Serial.println("  Interface:");
-  Serial.println("    echo | e on|off           -> eco serial");
-  Serial.println("    g                         -> le posicao do sensor angular");
-  Serial.println();
-  Serial.println("  Posicionamento com ADRC:");
-  Serial.println("    q | goto <deg> [rpm] [short|cw|ccw]");
-  Serial.println("                              -> vai ao alvo (0..360), rpm max e sentido opcionais");
-  Serial.println("    cw | ccw <deg> [rpm]      -> atalhos com sentido fixo");
-  Serial.println("    inc <ddeg> [rpm]          -> move incremental CW (negativo=CCW, ex.: inc 90 1.8)");
-  Serial.println("    dec <ddeg> [rpm]          -> move incremental CCW (negativo=CW, ex.: dec 90 1.8)");
-  Serial.println("                              -> suporta multiplas voltas: inc 450 1.8 (1 volta + 90 graus)");
-  Serial.println("    qc | cancelmove           -> cancela movimento de posicao");
-  Serial.println();
-  Serial.println("  Sequencia automatica:");
-  Serial.println("    run | running on|off      -> liga/desliga o ciclo (off para o motor)");
-  Serial.println("  Controle ADRC:");
-  Serial.println("    awc | adrc_wc <valor>     -> banda do controlador [30]");
-  Serial.println("    awo | adrc_wo <valor>     -> banda do observador [100]");
-  Serial.println("    ab0 | adrc_b0 <valor>     -> ganho estimado da planta [250]");
-  Serial.println();
-  Serial.println("  Configuracao de movimento:");
-  Serial.println("    pw | poswin <deg>         -> janela de chegada [1.2]");
-  Serial.println("    ap | accel_pos <ms>       -> tempo aceleracao [250ms]");
-  Serial.println("    dp | decel_pos <ms>       -> tempo desaceleracao [220ms]");
-  Serial.println("    kpp | kick_pwm <pct>      -> kick do posicionamento em PWM% [85]");
-  Serial.println("    kms | kick_ms <ms>        -> duracao kick [180ms]");
-  Serial.println("    sts | samples_to_stop <n> -> leituras para parar [3]");
-  Serial.println("    drpm| default_rpm <rpm>   -> RPM padrao para q/inc/dec [1.8]");
-  Serial.println("    mr  | maxrpm <rpm>        -> limite max de RPM do servo [2.4]");
-  Serial.println("    pr  | physrpm <rpm>       -> limite fisico estimado do motor [2.0]");
-  Serial.println();
-  Serial.println("  Forma compacta (letra+valor, sem espaco):");
-  Serial.println("    p35  v-40  a250  z80  l60  k100  df  ts20  eon");
-}
-
-// ─── alvo ───────────────────────────────────────────────────────────────────
-
-void setTargetFromUnsignedPercent(float pct) {
-  g_state.target_percent =
-    clampf(pct, 0.0f, 100.0f) * (float)g_state.direction_sign;
-}
-
-// ─── parser de comandos ──────────────────────────────────────────────────────
-
-void parseAndHandleCommand(char* line) {
-  if (!line || !line[0]) return;
-
-  for (size_t i = 0; line[i]; ++i)
-    line[i] = (char)tolower((unsigned char)line[i]);
-
-  char* ctx = nullptr;
-  char* cmd = strtok_r(line, " \t", &ctx);
-  if (!cmd) return;
-
-  char inline_value[SERIAL_LINE_BUFFER] = {0};
-
-  // Forma compacta: p35 -> cmd="p", inline_value="35"
-  if (strlen(cmd) > 1 && !isLongCommand(cmd)) {
-    if (strchr("psrvdmazclekx?", cmd[0])) {
-      memcpy(inline_value, cmd + 1, sizeof(inline_value) - 1);
-      cmd[1] = '\0';
-    }
-  }
-
-  auto nextArg = [&]() -> char* {
-    return inline_value[0] ? inline_value : strtok_r(nullptr, " \t", &ctx);
-  };
-
-  auto parseMoveDirection = [](const char* token, MotionDirection* direction) -> bool {
-    if (!token || !direction) return false;
-    if (!strcmp(token, "short") || !strcmp(token, "shortest") || !strcmp(token, "nearest")) {
-      *direction = MotionDirection::Shortest;
-      return true;
-    }
-    if (!strcmp(token, "cw") || !strcmp(token, "horario") || !strcmp(token, "cw+")) {
-      *direction = MotionDirection::Clockwise;
-      return true;
-    }
-    if (!strcmp(token, "ccw") || !strcmp(token, "anti") || !strcmp(token, "antihorario") || !strcmp(token, "ccw-")) {
-      *direction = MotionDirection::CounterClockwise;
-      return true;
-    }
-    return false;
-  };
-
-  auto parseFloatToken = [](const char* token, float* value) -> bool {
-    if (!token || !value) return false;
-    char* end = nullptr;
-    const float parsed = strtof(token, &end);
-    if (end == token || (end && *end != '\0')) return false;
-    *value = parsed;
-    return true;
-  };
-
-  // ── ajuda / estado ──────────────────────────────────────────────────────
-
-  if (!strcmp(cmd,"help") || !strcmp(cmd,"h") || !strcmp(cmd,"?")) {
-    printHelp(); return;
-  }
-  if (!strcmp(cmd,"status") || !strcmp(cmd,"s")) {
-    printStatus(); return;
-  }
-
-  // ── ciclo automatico ───────────────────────────────────────────────────
-
-  if (!strcmp(cmd,"run") || !strcmp(cmd,"running")) {
-    char* val = nextArg();
-    if (!val) {
-      Serial.printf("OK: running=%s  fase=%s\n",
-                    g_sequence_motion.running() ? "on" : "off",
-                    g_sequence_motion.phaseText());
-      return;
-    }
-    if (!strcmp(val,"on") || !strcmp(val,"1") || !strcmp(val,"true")) {
-      if (!g_angle_sensor.active()) {
-        printErrorAndPrompt("ERRO: sensor angular nao detectado no I2C");
-        return;
-      }
-      setRepetitiveRunning(true);
-      Serial.printf("OK: running=%s\n", g_sequence_motion.running() ? "on" : "off");
-    } else if (!strcmp(val,"off") || !strcmp(val,"0") || !strcmp(val,"false")) {
-      setRepetitiveRunning(false);
-      Serial.println("OK: running=off; motor parado");
-    } else {
-      printErrorAndPrompt("ERRO: use run on|off");
-    }
-    return;
-  }
-
-  if (!strcmp(cmd,"g")) {
-    if (!g_angle_sensor.active()) {
-      Serial.println("ERRO: sensor angular nao detectado no I2C");
-      return;
-    }
-
-    uint16_t raw_angle = 0;
-    if (!g_angle_sensor.readRawAngle(&raw_angle)) {
-      Serial.println("ERRO: falha ao ler sensor angular");
-      return;
-    }
-
-    const float degrees = ((float)raw_angle * 360.0f) / 4096.0f;
-    Serial.printf("%s: raw=%u  deg=%.2f\n",
-                  g_angle_sensor.sensorName(), raw_angle, degrees);
-    return;
-  }
-
-  if (!strcmp(cmd,"awc") || !strcmp(cmd,"adrc_wc") ||
-      !strcmp(cmd,"awo") || !strcmp(cmd,"adrc_wo") ||
-      !strcmp(cmd,"ab0") || !strcmp(cmd,"adrc_b0")) {
-    char* val = nextArg();
-    AdrcPositionSettings s = g_position_servo.settings();
-    float* setting = !strcmp(cmd,"awc") || !strcmp(cmd,"adrc_wc")
-                       ? &s.control_bandwidth
-                       : (!strcmp(cmd,"awo") || !strcmp(cmd,"adrc_wo")
-                            ? &s.observer_bandwidth : &s.plant_gain);
-    const char* name = !strcmp(cmd,"awc") || !strcmp(cmd,"adrc_wc")
-                         ? "wc" : ((!strcmp(cmd,"awo") || !strcmp(cmd,"adrc_wo")) ? "wo" : "b0");
-    if (!val) {
-      Serial.printf("OK: ADRC %s=%.3f\n", name, *setting);
-      return;
-    }
-    if (g_position_servo.isActive() || g_sequence_motion.running()) {
-      printErrorAndPrompt("ERRO: pare o motor antes de alterar ADRC");
-      return;
-    }
-    float parsed = 0.0f;
-    if (!parseFloatToken(val, &parsed) || parsed <= 0.0f) {
-      printErrorAndPrompt("ERRO: ganho ADRC deve ser positivo");
-      return;
-    }
-    if (setting == &s.control_bandwidth) parsed = clampf(parsed, 1.0f, 100.0f);
-    else if (setting == &s.observer_bandwidth) parsed = clampf(parsed, 1.0f, 300.0f);
-    else parsed = clampf(parsed, 1.0f, 2000.0f);
-    *setting = parsed;
-    g_position_servo.setSettings(s);
-    saveAdrcSettings();
-    Serial.printf("OK: ADRC %s=%.3f (persistente)\n", name, parsed);
-    return;
-  }
-
-  if (!strcmp(cmd,"q") || !strcmp(cmd,"goto") || !strcmp(cmd,"go")
-      || !strcmp(cmd,"move") || !strcmp(cmd,"cw") || !strcmp(cmd,"ccw")) {
-    if (!g_angle_sensor.active()) {
-      printErrorAndPrompt("ERRO: sensor angular nao detectado no I2C");
-      return;
-    }
-    setRepetitiveRunning(false);
-
-    char* deg_token = nextArg();
-    char* extra1 = strtok_r(nullptr, " \t", &ctx);
-    char* extra2 = strtok_r(nullptr, " \t", &ctx);
-    if (!deg_token) {
-      printErrorAndPrompt("ERRO: use q <deg> [rpm] [short|cw|ccw]");
-      return;
-    }
-
-    const float target_deg = (float)atof(deg_token);
-    const AdrcPositionSettings& s = g_position_servo.settings();
-    float vmax_rpm = g_default_move_max_rpm;
-    MotionDirection direction = MotionDirection::Shortest;
-
-    if (!strcmp(cmd, "cw")) direction = MotionDirection::Clockwise;
-    if (!strcmp(cmd, "ccw")) direction = MotionDirection::CounterClockwise;
-
-    auto consumeToken = [&](char* token) {
-      if (!token) return;
-      float parsed_value = 0.0f;
-      if (parseMoveDirection(token, &direction)) return;
-      if (parseFloatToken(token, &parsed_value)) vmax_rpm = parsed_value;
-    };
-
-    consumeToken(extra1);
-    consumeToken(extra2);
-    vmax_rpm = clampf(vmax_rpm, 0.0f, s.max_target_rpm);
-
-    float current_deg = 0.0f;
-    if (!readAngleSensorDeg(&current_deg)) {
-      printErrorAndPrompt("ERRO: falha ao ler sensor angular");
-      return;
-    }
-
-    g_position_servo.startMove(target_deg, vmax_rpm, direction);
-    g_position_servo.primeAccumulatedAngle(current_deg);
-    g_move_done_reported = false;
-    g_move_start_ms = millis();
-    const char* direction_text =
-      direction == MotionDirection::Clockwise ? "cw" :
-      direction == MotionDirection::CounterClockwise ? "ccw" : "short";
-    Serial.printf("OK: move alvo=%.2f deg  vmax=%.2f rpm  dir=%s\n", target_deg, vmax_rpm, direction_text);
-    return;
-  }
-
-  if (!strcmp(cmd,"inc")) {
-    if (!g_angle_sensor.active()) {
-      printErrorAndPrompt("ERRO: sensor angular nao detectado no I2C");
-      return;
-    }
-    setRepetitiveRunning(false);
-
-    char* delta_token = nextArg();
-    char* rpm_token = strtok_r(nullptr, " \t", &ctx);
-    if (!delta_token) {
-      printErrorAndPrompt("ERRO: use inc <ddeg> [rpm]");
-      return;
-    }
-
-    float delta_deg = (float)atof(delta_token);
-    const AdrcPositionSettings& s = g_position_servo.settings();
-    float vmax_rpm = g_default_move_max_rpm;
-
-    if (rpm_token) {
-      float parsed_rpm = 0.0f;
-      if (parseFloatToken(rpm_token, &parsed_rpm)) {
-        vmax_rpm = parsed_rpm;
-      }
-    }
-    vmax_rpm = clampf(vmax_rpm, 0.0f, s.max_target_rpm);
-
-    float current_deg = 0.0f;
-    if (!readAngleSensorDeg(&current_deg)) {
-      printErrorAndPrompt("ERRO: falha ao ler sensor angular");
-      return;
-    }
-
-    // Delta positivo = CW (Clockwise), negativo = CCW (CounterClockwise)
-    const float target_accumulated_deg = current_deg + delta_deg;
-    const MotionDirection direction =
-      delta_deg >= 0.0f ? MotionDirection::Clockwise
-                        : MotionDirection::CounterClockwise;
-
-    g_position_servo.startMove(target_accumulated_deg, vmax_rpm, direction);
-    g_position_servo.primeAccumulatedAngle(current_deg);
-    g_move_done_reported = false;
-    g_move_start_ms = millis();
-
-    const char* direction_text = delta_deg >= 0.0f ? "cw" : "ccw";
-    Serial.printf("OK: move inc d=%.2f deg  alvo=%.2f deg  vmax=%.2f rpm  dir=%s\n",
-                  delta_deg, target_accumulated_deg, vmax_rpm, direction_text);
-    return;
-  }
-
-  if (!strcmp(cmd,"dec")) {
-    if (!g_angle_sensor.active()) {
-      printErrorAndPrompt("ERRO: sensor angular nao detectado no I2C");
-      return;
-    }
-    setRepetitiveRunning(false);
-
-    char* delta_token = nextArg();
-    char* rpm_token = strtok_r(nullptr, " \t", &ctx);
-    if (!delta_token) {
-      printErrorAndPrompt("ERRO: use dec <ddeg> [rpm]");
-      return;
-    }
-
-    float delta_deg = (float)atof(delta_token);
-    const AdrcPositionSettings& s = g_position_servo.settings();
-    float vmax_rpm = g_default_move_max_rpm;
-
-    if (rpm_token) {
-      float parsed_rpm = 0.0f;
-      if (parseFloatToken(rpm_token, &parsed_rpm)) {
-        vmax_rpm = parsed_rpm;
-      }
-    }
-    vmax_rpm = clampf(vmax_rpm, 0.0f, s.max_target_rpm);
-
-    float current_deg = 0.0f;
-    if (!readAngleSensorDeg(&current_deg)) {
-      printErrorAndPrompt("ERRO: falha ao ler sensor angular");
-      return;
-    }
-
-    // Delta positivo = CCW (CounterClockwise), negativo = CW (Clockwise)
-    const float target_accumulated_deg = current_deg - delta_deg;
-    const MotionDirection direction =
-      delta_deg >= 0.0f ? MotionDirection::CounterClockwise
-                        : MotionDirection::Clockwise;
-
-    g_position_servo.startMove(target_accumulated_deg, vmax_rpm, direction);
-    g_position_servo.primeAccumulatedAngle(current_deg);
-    g_move_done_reported = false;
-    g_move_start_ms = millis();
-
-    const char* direction_text = delta_deg >= 0.0f ? "ccw" : "cw";
-    Serial.printf("OK: move dec d=%.2f deg  alvo=%.2f deg  vmax=%.2f rpm  dir=%s\n",
-                  delta_deg, target_accumulated_deg, vmax_rpm, direction_text);
-    return;
-  }
-
-  if (!strcmp(cmd,"qc") || !strcmp(cmd,"cancelmove")) {
-    setRepetitiveRunning(false);
-    Serial.println("OK: movimento/ciclo cancelado");
-    return;
-  }
-
-  // ── Configuração de movimento ───────────────────────────────────────────
-
-  if (!strcmp(cmd,"pw") || !strcmp(cmd,"poswin")) {
-    char* val = nextArg();
-    AdrcPositionSettings s = g_position_servo.settings();
-    if (!val) {
-      Serial.printf("OK: poswin=%.2f\n", s.stop_window_deg);
-      return;
-    }
-    s.stop_window_deg = clampf((float)atof(val), 0.2f, 20.0f);
-    g_position_servo.setSettings(s);
-    Serial.printf("OK: poswin=%.2f\n", s.stop_window_deg);
-    return;
-  }
-
-  if (!strcmp(cmd,"ap") || !strcmp(cmd,"accel_pos")) {
-    char* val = nextArg();
-    AdrcPositionSettings s = g_position_servo.settings();
-    if (!val) {
-      Serial.printf("OK: accel_pos=%ums\n", s.accel_ramp_ms);
-      return;
-    }
-    s.accel_ramp_ms = (uint16_t)constrain(atol(val), 50L, 2000L);
-    g_position_servo.setSettings(s);
-    Serial.printf("OK: accel_pos=%ums\n", s.accel_ramp_ms);
-    return;
-  }
-
-  if (!strcmp(cmd,"dp") || !strcmp(cmd,"decel_pos")) {
-    char* val = nextArg();
-    AdrcPositionSettings s = g_position_servo.settings();
-    if (!val) {
-      Serial.printf("OK: decel_pos=%ums\n", s.decel_ramp_ms);
-      return;
-    }
-    s.decel_ramp_ms = (uint16_t)constrain(atol(val), 50L, 2000L);
-    g_position_servo.setSettings(s);
-    Serial.printf("OK: decel_pos=%ums\n", s.decel_ramp_ms);
-    return;
-  }
-
-  if (!strcmp(cmd,"kpp") || !strcmp(cmd,"kick_pwm") || !strcmp(cmd,"krp") || !strcmp(cmd,"kick_rpm")) {
-    char* val = nextArg();
-    AdrcPositionSettings s = g_position_servo.settings();
-    if (!val) {
-      Serial.printf("OK: kick_pwm=%.1f%%\n", s.kick_pwm_percent);
-      return;
-    }
-    s.kick_pwm_percent = clampf((float)atof(val), 0.0f, 100.0f);
-    g_position_servo.setSettings(s);
-    Serial.printf("OK: kick_pwm=%.1f%%\n", s.kick_pwm_percent);
-    return;
-  }
-
-  if (!strcmp(cmd,"kms") || !strcmp(cmd,"kick_ms")) {
-    char* val = nextArg();
-    AdrcPositionSettings s = g_position_servo.settings();
-    if (!val) {
-      Serial.printf("OK: kick_ms=%ums\n", s.kick_ms);
-      return;
-    }
-    s.kick_ms = (uint16_t)constrain(atol(val), 0L, 1000L);
-    g_position_servo.setSettings(s);
-    Serial.printf("OK: kick_ms=%ums\n", s.kick_ms);
-    return;
-  }
-
-  if (!strcmp(cmd,"sts") || !strcmp(cmd,"samples_to_stop")) {
-    char* val = nextArg();
-    AdrcPositionSettings s = g_position_servo.settings();
-    if (!val) {
-      Serial.printf("OK: samples_to_stop=%u\n", s.samples_to_stop);
-      return;
-    }
-    s.samples_to_stop = (uint16_t)constrain(atol(val), 1L, 20L);
-    g_position_servo.setSettings(s);
-    Serial.printf("OK: samples_to_stop=%u\n", s.samples_to_stop);
-    return;
-  }
-
-  if (!strcmp(cmd,"mr") || !strcmp(cmd,"maxrpm")) {
-    char* val = nextArg();
-    AdrcPositionSettings s = g_position_servo.settings();
-    if (!val) {
-      Serial.printf("OK: maxrpm=%.2f\n", s.max_target_rpm);
-      return;
-    }
-    const float new_max = clampf((float)atof(val), 1.0f, 200.0f);
-    s.max_target_rpm = new_max;
-    g_position_servo.setSettings(s);
-    Serial.printf("OK: maxrpm=%.2f\n", s.max_target_rpm);
-    return;
-  }
-
-  if (!strcmp(cmd,"drpm") || !strcmp(cmd,"default_rpm")) {
-    char* val = nextArg();
-    const AdrcPositionSettings& s = g_position_servo.settings();
-    if (!val) {
-      Serial.printf("OK: default_rpm=%.2f\n", g_default_move_max_rpm);
-      return;
-    }
-    g_default_move_max_rpm = clampf((float)atof(val), 0.1f, s.max_target_rpm);
-    Serial.printf("OK: default_rpm=%.2f\n", g_default_move_max_rpm);
-    return;
-  }
-
-  if (!strcmp(cmd,"pr") || !strcmp(cmd,"physrpm")) {
-    char* val = nextArg();
-    AdrcPositionSettings s = g_position_servo.settings();
-    if (!val) {
-      Serial.printf("OK: physrpm=%.2f\n", s.physical_max_rpm);
-      return;
-    }
-    s.physical_max_rpm = clampf((float)atof(val), 1.0f, 100.0f);
-    g_position_servo.setSettings(s);
-    Serial.printf("OK: physrpm=%.2f\n", s.physical_max_rpm);
-    return;
-  }
-
-  // ── selecao rapida de canal ─────────────────────────────────────────────
-
-  if (!strcmp(cmd,"ma") || !strcmp(cmd,"motora")) {
-    selectMotor(MotorSelection::A_IN1_IN2); printMotorOk(); return;
-  }
-  if (!strcmp(cmd,"mb") || !strcmp(cmd,"motorb")) {
-    selectMotor(MotorSelection::B_IN3_IN4); printMotorOk(); return;
-  }
-  if (!strcmp(cmd,"mm") || !strcmp(cmd,"motorboth")) {
-    selectMotor(MotorSelection::BOTH); printMotorOk(); return;
-  }
-
-  // ── controle ────────────────────────────────────────────────────────────
-
-  if (!strcmp(cmd,"pwmf") || !strcmp(cmd,"pf")) {
-    char* val = nextArg();
-    if (!val) {
-      Serial.printf("OK: pwmf=%u Hz (faixa %u..%u)\n",
-                    g_pwm_frequency_hz,
-                    PWM_MIN_FREQUENCY_HZ,
-                    PWM_MAX_FREQUENCY_HZ);
-      return;
-    }
-    const uint32_t freq = (uint32_t)atol(val);
-    if (!setPwmFrequencyHz(freq)) {
-      Serial.printf("ERRO: use pf <%u..%u>\n",
-                    PWM_MIN_FREQUENCY_HZ,
-                    PWM_MAX_FREQUENCY_HZ);
-      return;
-    }
-    Serial.printf("OK: pwmf=%u Hz\n", g_pwm_frequency_hz);
-    return;
-  }
-
-  if (!strcmp(cmd,"stop") || !strcmp(cmd,"x")) {
-    setRepetitiveRunning(false);
-    g_state.target_percent  = 0.0f;
-    g_state.current_percent = 0.0f;
-    g_state.drive_phase     = DrivePhase::IDLE;
-    applyMotorOutput(0);
-    Serial.println("OK: stop");
-    return;
-  }
-
-  if (!strcmp(cmd,"brake") || !strcmp(cmd,"b")) {
-    setRepetitiveRunning(false);
-    g_state.target_percent  = 0.0f;
-    g_state.current_percent = 0.0f;
-    if (g_state.brake_ms > 0) {
-      g_state.drive_phase    = DrivePhase::BRAKE;
-      g_state.brake_start_ms = millis();
-      Serial.printf("OK: brake %ums\n", g_state.brake_ms);
-    } else {
-      g_state.drive_phase = DrivePhase::IDLE;
-      applyMotorOutput(0);
-      Serial.println("OK: brake (coast)");
-    }
-    return;
-  }
-
-  if (!strcmp(cmd,"pwm") || !strcmp(cmd,"p")) {
-    setRepetitiveRunning(false);
-    char* val = nextArg();
-    if (!val) { printErrorAndPrompt("ERRO: use p <0..100>"); return; }
-    setTargetFromUnsignedPercent((float)atof(val));
-    Serial.printf("OK: pwm %.1f%% (%s)\n",
-                  fabsf(g_state.target_percent),
-                  g_state.direction_sign > 0 ? "fwd" : "rev");
-    return;
-  }
-
-  if (!strcmp(cmd,"set") || !strcmp(cmd,"v")) {
-    setRepetitiveRunning(false);
-    char* val = nextArg();
-    if (!val) { printErrorAndPrompt("ERRO: use v <-100..100>"); return; }
-    const float pct = clampf((float)atof(val), -100.0f, 100.0f);
-    g_state.target_percent = pct;
-    if      (pct > 0.0f) g_state.direction_sign =  1;
-    else if (pct < 0.0f) g_state.direction_sign = -1;
-    Serial.printf("OK: set %.1f%%\n", pct);
-    return;
-  }
-
-  if (!strcmp(cmd,"rev") || !strcmp(cmd,"r")) {
-    setRepetitiveRunning(false);
-    g_state.direction_sign *= -1;
-    g_state.target_percent  = -g_state.target_percent;
-    Serial.printf("OK: rev -> %s\n",
-                  g_state.direction_sign > 0 ? "fwd" : "rev");
-    return;
-  }
-
-  if (!strcmp(cmd,"dir") || !strcmp(cmd,"d")) {
-    setRepetitiveRunning(false);
-    char* val = nextArg();
-    if (!val) { printErrorAndPrompt("ERRO: use d f|r"); return; }
-    if (!strcmp(val,"f") || !strcmp(val,"fwd") || !strcmp(val,"frente")) {
-      g_state.direction_sign = 1;
-      if (g_state.target_percent < 0.0f)
-        g_state.target_percent = -g_state.target_percent;
-      Serial.println("OK: dir fwd");
-    } else if (!strcmp(val,"r") || !strcmp(val,"rev") || !strcmp(val,"re")) {
-      g_state.direction_sign = -1;
-      if (g_state.target_percent > 0.0f)
-        g_state.target_percent = -g_state.target_percent;
-      Serial.println("OK: dir rev");
-    } else {
-      printErrorAndPrompt("ERRO: use d f|r");
-    }
-    return;
-  }
-
-  // ── canal do motor ──────────────────────────────────────────────────────
-
-  if (!strcmp(cmd,"motor") || !strcmp(cmd,"m")) {
-    char* val = nextArg();
-    if (!val) { printErrorAndPrompt("ERRO: use m in3|in1|both"); return; }
-    MotorSelection sel;
-    if (parseMotorToken(val, &sel)) { selectMotor(sel); printMotorOk(); }
-    else printErrorAndPrompt("ERRO: use m in3|in1|both");
-    return;
-  }
-
-  // ── rampas ──────────────────────────────────────────────────────────────
-
-  if (!strcmp(cmd,"accel") || !strcmp(cmd,"a")) {
-    char* val = nextArg();
-    if (!val) { Serial.printf("OK: accel=%ums\n", g_state.accel_ms); return; }
-    g_state.accel_ms = (uint16_t)constrain(atol(val), 1L, 5000L);
-    Serial.printf("OK: accel=%ums\n", g_state.accel_ms);
-    return;
-  }
-
-  if (!strcmp(cmd,"decel") || !strcmp(cmd,"z")) {
-    char* val = nextArg();
-    if (!val) { Serial.printf("OK: decel=%ums\n", g_state.decel_ms); return; }
-    g_state.decel_ms = (uint16_t)constrain(atol(val), 1L, 5000L);
-    Serial.printf("OK: decel=%ums\n", g_state.decel_ms);
-    return;
-  }
-
-  if (!strcmp(cmd,"curve") || !strcmp(cmd,"c")) {
-    char* acc = nextArg();
-    char* dec = strtok_r(nullptr, " \t", &ctx);
-    if (!acc || !dec) { printErrorAndPrompt("ERRO: use c <acc> <dec>"); return; }
-    g_state.accel_curve = clampf((float)atof(acc), 0.2f, 3.0f);
-    g_state.decel_curve = clampf((float)atof(dec), 0.2f, 3.0f);
-    Serial.printf("OK: curve acc=%.2f dec=%.2f\n",
-                  g_state.accel_curve, g_state.decel_curve);
-    return;
-  }
-
-  // ── dead band / kick / freio / limite ────────────────────────────────────
-
-  if (!strcmp(cmd,"tstart") || !strcmp(cmd,"ts")) {
-    char* val = nextArg();
-    if (!val) {
-      Serial.printf("OK: tstart=%.0f%%\n", g_state.threshold_start);
-      return;
-    }
-    g_state.threshold_start = clampf((float)atof(val), 1.0f, 50.0f);
-    // Garante que tstop < tstart
-    if (g_state.threshold_stop >= g_state.threshold_start)
-      g_state.threshold_stop = g_state.threshold_start * 0.4f;
-    Serial.printf("OK: tstart=%.0f%%  tstop=%.0f%%\n",
-                  g_state.threshold_start, g_state.threshold_stop);
-    return;
-  }
-
-  if (!strcmp(cmd,"tstop") || !strcmp(cmd,"tp")) {
-    char* val = nextArg();
-    if (!val) {
-      Serial.printf("OK: tstop=%.0f%%\n", g_state.threshold_stop);
-      return;
-    }
-    g_state.threshold_stop =
-      clampf((float)atof(val), 0.0f, g_state.threshold_start - 1.0f);
-    Serial.printf("OK: tstop=%.0f%%\n", g_state.threshold_stop);
-    return;
-  }
-
-  if (!strcmp(cmd,"kick") || !strcmp(cmd,"k")) {
-    char* val = nextArg();
-    if (!val) { Serial.printf("OK: kick=%ums\n", g_state.kick_ms); return; }
-    g_state.kick_ms = (uint16_t)constrain(atol(val), 0L, 2000L);
-    Serial.printf("OK: kick=%ums%s\n", g_state.kick_ms,
-                  g_state.kick_ms == 0 ? " (desabilitado)" : "");
-    return;
-  }
-
-  if (!strcmp(cmd,"kickp") || !strcmp(cmd,"kp")) {
-    char* val = nextArg();
-    if (!val) { Serial.printf("OK: kickp=%.0f%%\n", g_state.kick_pct); return; }
-    g_state.kick_pct = clampf((float)atof(val), 0.0f, 100.0f);
-    Serial.printf("OK: kickp=%.0f%%\n", g_state.kick_pct);
-    return;
-  }
-
-  if (!strcmp(cmd,"brakems") || !strcmp(cmd,"bm")) {
-    char* val = nextArg();
-    if (!val) { Serial.printf("OK: brakems=%ums\n", g_state.brake_ms); return; }
-    g_state.brake_ms = (uint16_t)constrain(atol(val), 0L, 2000L);
-    Serial.printf("OK: brakems=%ums%s\n", g_state.brake_ms,
-                  g_state.brake_ms == 0 ? " (coast)" : "");
-    return;
-  }
-
-  if (!strcmp(cmd,"limit") || !strcmp(cmd,"l")) {
-    char* val = nextArg();
-    if (!val) {
-      Serial.printf("OK: limit=%u%%\n", g_state.power_limit_percent);
-      return;
-    }
-    g_state.power_limit_percent = (uint8_t)constrain(atol(val), 0L, 100L);
-    Serial.printf("OK: limit=%u%%\n", g_state.power_limit_percent);
-    return;
-  }
-
-  // ── interface ───────────────────────────────────────────────────────────
-
-  if (!strcmp(cmd,"echo") || !strcmp(cmd,"e")) {
-    char* val = nextArg();
-    if (!val) {
-      Serial.printf("OK: echo %s\n",
-                    g_state.serial_echo_enabled ? "on" : "off");
-      return;
-    }
-    if (!strcmp(val,"on") || !strcmp(val,"1")) {
-      g_state.serial_echo_enabled = true;
-      Serial.println("OK: echo on");
-    } else if (!strcmp(val,"off") || !strcmp(val,"0")) {
-      g_state.serial_echo_enabled = false;
-      Serial.println("OK: echo off");
-    } else {
-      printErrorAndPrompt("ERRO: use e on|off");
-    }
-    return;
-  }
-
-  printErrorAndPrompt("ERRO: comando desconhecido. Digite h");
-}
-
-// ─── input serial ───────────────────────────────────────────────────────────
-
-void processSerialInput() {
-  while (Serial.available() > 0) {
-    const char c = (char)Serial.read();
-
-    if (c == '\r') continue;
-
-    if (c == '\b' || c == 127) {
-      if (g_serial_index > 0) {
-        g_serial_index--;
-        if (g_state.serial_echo_enabled) Serial.print("\b \b");
-      }
-      continue;
-    }
-
-    if (c == '\n') {
-      g_serial_line[g_serial_index] = '\0';
-      if (g_state.serial_echo_enabled) Serial.println();
-      parseAndHandleCommand(g_serial_line);
-      g_serial_index = 0;
-      g_serial_prompt_pending = true;
-      continue;
-    }
-
-    if (g_serial_index < SERIAL_LINE_BUFFER - 1) {
-      g_serial_line[g_serial_index++] = c;
-      if (g_state.serial_echo_enabled) Serial.print(c);
-    } else {
-      g_serial_index = 0;
-      printErrorAndPrompt("\nERRO: linha muito longa");
-    }
-  }
-}
-
-// ─── maquina de controle ────────────────────────────────────────────────────
-
-void updateRampControl() {
-  const uint32_t now = millis();
-
-  if (g_state.last_control_update_ms == 0) {
-    g_state.last_control_update_ms = now;
-    return;
-  }
-
-  const uint32_t dt = now - g_state.last_control_update_ms;
-  if (dt < CONTROL_PERIOD_MS) return;
-  g_state.last_control_update_ms = now;
-
-  if (g_sensor_pause_active ||
-      (g_position_servo.isActive() && !g_angle_sensor.active())) {
-    g_state.target_percent = 0.0f;
-    g_state.current_percent = 0.0f;
-    g_state.drive_phase = DrivePhase::IDLE;
-    applyMotorOutput(0);
-    return;
-  }
-
-  const bool servo_active = g_position_servo.isActive();
-
-  // No modo de posicionamento, usa diretamente a saida calculada pelo ADRC
-  // (sem a rampa manual adicional desta maquina de fases).
-  if (servo_active) {
-    g_state.current_percent = g_state.target_percent;
-    g_state.drive_phase = (fabsf(g_state.current_percent) > 0.01f)
-                           ? DrivePhase::RUNNING
-                           : DrivePhase::IDLE;
-
-    float limited = signedPercentToLimitedPercent(
-                      g_state.current_percent, g_state.power_limit_percent);
-    if (fabsf(limited) <= 0.01f) {
-      applyMotorOutput(0);
-      return;
-    }
-
-    const uint8_t pwm = percentToPwm(fabsf(limited));
-    const int16_t out = (limited >= 0.0f) ? (int16_t)pwm : -(int16_t)pwm;
-    applyMotorOutput(out);
-    return;
-  }
-
-  const bool kick_allowed = !servo_active && (g_state.kick_ms > 0);
-
-  const float  tstart      = g_state.threshold_start;
-  const float  tstop       = g_state.threshold_stop;
-  const bool   target_zero = fabsf(g_state.target_percent) <= tstop;
-  const int8_t target_sign = (g_state.target_percent >= 0.0f) ? 1 : -1;
-
-  switch (g_state.drive_phase) {
-
-    // ── IDLE ──────────────────────────────────────────────────────────────
-    case DrivePhase::IDLE: {
-      g_state.current_percent = 0.0f;
-      if (!target_zero) {
-        g_state.kick_direction = target_sign;
-        if (kick_allowed) {
-          g_state.drive_phase   = DrivePhase::KICK;
-          g_state.kick_start_ms = now;
-        } else {
-          // Sem kick: entra em RUNNING logo acima do tstop
-          g_state.current_percent = g_state.kick_direction * (tstop + 0.1f);
-          g_state.drive_phase     = DrivePhase::RUNNING;
-        }
-      }
-      applyMotorOutput(0);
-      return;
-    }
-
-    // ── KICK ──────────────────────────────────────────────────────────────
-    case DrivePhase::KICK: {
-      if (!kick_allowed || now - g_state.kick_start_ms >= g_state.kick_ms) {
-        // Kick concluido: inicia RUNNING a partir de tstart
-        g_state.current_percent = g_state.kick_direction * tstart;
-        g_state.drive_phase     = DrivePhase::RUNNING;
-        // cai em RUNNING logo abaixo
-      } else {
-        // Pulso ativo
-        const float kick_out = g_state.kick_direction * g_state.kick_pct;
-        const float limited  = signedPercentToLimitedPercent(
-                                 kick_out, g_state.power_limit_percent);
-        const uint8_t pwm = percentToPwm(fabsf(limited));
-        const int16_t out = (limited >= 0.0f) ? (int16_t)pwm : -(int16_t)pwm;
-        applyMotorOutput(out);
-        return;
-      }
-      [[fallthrough]];
-    }
-
-    // ── RUNNING ───────────────────────────────────────────────────────────
-    case DrivePhase::RUNNING: {
-      const int8_t current_sign = (g_state.current_percent > 0.0f) ? 1 : -1;
-      const bool   reversed     = !target_zero && (target_sign != current_sign);
-
-      // Se invertendo, rampa em direcao ao zero.
-      // Ao chegar em tstop -> IDLE -> KICK no novo sentido.
-      const float ramp_target = reversed ? 0.0f : g_state.target_percent;
-      const float error       = ramp_target - g_state.current_percent;
-      const float abs_error   = fabsf(error);
-
-      if (abs_error < 0.01f) {
-        g_state.current_percent = ramp_target;
-      } else {
-        const bool accelerating =
-          fabsf(ramp_target) > fabsf(g_state.current_percent);
-        const uint16_t ramp_ms =
-          accelerating ? g_state.accel_ms : g_state.decel_ms;
-        const float gamma =
-          accelerating ? g_state.accel_curve : g_state.decel_curve;
-        const float step =
-          (100.0f * (float)dt / (float)ramp_ms) *
-          (0.15f + 0.85f * powf(
-            clampf(abs_error / 100.0f, 0.0f, 1.0f), gamma));
-
-        if (abs_error <= step) {
-          g_state.current_percent = ramp_target;
-        } else {
-          g_state.current_percent += (error > 0.0f) ? step : -step;
-        }
-      }
-
-      // Caiu abaixo do tstop: vai para IDLE.
-      // IDLE fara KICK no sentido do target se ainda houver alvo.
-      if (fabsf(g_state.current_percent) <= tstop) {
-        g_state.current_percent = 0.0f;
-        g_state.drive_phase     = DrivePhase::IDLE;
-        applyMotorOutput(0);
-        return;
-      }
-
-      // Saida com remapeamento de dead band:
-      // current [tstop..100] -> PWM [tstart..100]
-      const float mapped  = applyDeadBandRemap(
-                              fabsf(g_state.current_percent), tstart, tstop);
-      const float limited = signedPercentToLimitedPercent(
-                              mapped, g_state.power_limit_percent);
-      const uint8_t pwm = percentToPwm(limited);
-      const int16_t out =
-        (g_state.current_percent >= 0.0f) ? (int16_t)pwm : -(int16_t)pwm;
-      applyMotorOutput(out);
-      return;
-    }
-
-    // ── BRAKE ─────────────────────────────────────────────────────────────
-    case DrivePhase::BRAKE: {
-      if (now - g_state.brake_start_ms >= g_state.brake_ms) {
-        g_state.current_percent = 0.0f;
-        g_state.drive_phase     = DrivePhase::IDLE;
-        applyMotorOutput(0);
-      } else {
-        applyBrakeOutput();
-      }
-      return;
-    }
-  }
-}
-
 // ─── setup / loop ───────────────────────────────────────────────────────────
 
 void setup() {
   Serial.begin(SERIAL_BAUD);
+  MotorDriverSettings motor_settings;
+  motor_settings.pwm_frequency_hz = g_pwm_frequency_hz;
+  motor_settings.pwm_resolution_bits = PWM_RESOLUTION_BITS;
+  motor_settings.power_limit_percent = g_power_limit_percent;
+  if (!g_motor_driver.begin(motor_settings)) {
+    Serial.println("ERRO: falha ao inicializar ponte H");
+  }
   delay(SERIAL_STARTUP_WAIT_MS);
-
-  setPwmFrequencyHz(g_pwm_frequency_hz);
-  configurePwmOutputs(g_pwm_frequency_hz, PWM_RESOLUTION_BITS);
 
   AdrcPositionSettings pos_settings;
 
@@ -2482,18 +1222,10 @@ void setup() {
   g_position_servo.setSettings(pos_settings);
   loadRepetitiveMotionPreferences();
   setPwmFrequencyHz(g_pwm_frequency_hz);
-  configurePwmOutputs(g_pwm_frequency_hz, PWM_RESOLUTION_BITS);
 
   g_angle_sensor.begin(Wire, I2C_SDA_PIN, I2C_SCL_PIN, 400000);
 
-  pinMode(MOTOR_A_IN1, OUTPUT);
-  pinMode(MOTOR_A_IN2, OUTPUT);
-  pinMode(MOTOR_B_IN1, OUTPUT);
-  pinMode(MOTOR_B_IN2, OUTPUT);
   pinMode(OTA_BUTTON_PIN, INPUT_PULLUP);
-
-  setMotorSignedPwm(0, MOTOR_A_IN1, MOTOR_A_IN2);
-  setMotorSignedPwm(0, MOTOR_B_IN1, MOTOR_B_IN2);
 
   WiFi.mode(WIFI_OFF);
 
@@ -2531,7 +1263,6 @@ void setup() {
   }
 
   Serial.println("Serial: comandos desativados; interface disponivel apenas via web");
-  g_serial_prompt_pending = false;
 }
 
 void loop() {
@@ -2545,6 +1276,5 @@ void loop() {
     g_sequence_motion.update(now_ms);
   }
   updatePositionMoveControl();
-  updateRampControl();
 
 }
