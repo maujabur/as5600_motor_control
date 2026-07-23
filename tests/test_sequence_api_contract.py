@@ -5,17 +5,19 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAIN = (ROOT / "src" / "main.cpp").read_text(encoding="utf-8")
 PAGE = (ROOT / "src" / "repetitive_motion_web_page.h").read_text(encoding="utf-8")
+SETTINGS = (ROOT / "lib/settings/DeviceSettings.h").read_text(encoding="utf-8")
+STORE = (ROOT / "lib/settings/PreferencesSettingsStore.cpp").read_text(encoding="utf-8")
 
 
 class SequenceApiContractTest(unittest.TestCase):
     def test_versioned_sequence_uses_safe_defaults_without_legacy_migration(self):
-        self.assertIn("SEQUENCE_STORAGE_VERSION", MAIN)
-        self.assertIn('getBytes("sequence"', MAIN)
-        self.assertIn('putBytes("sequence"', MAIN)
+        self.assertIn("DEVICE_SETTINGS_VERSION", SETTINGS)
+        self.assertIn('getBytes("snapshot"', STORE)
+        self.assertIn('putBytes("snapshot"', STORE)
         self.assertNotIn('getFloat("start_deg"', MAIN)
-        self.assertIn("sequence.startup_step = {0.0f, 1.0f, 1000", MAIN)
-        self.assertIn("MotionDirection::Clockwise", MAIN)
-        self.assertIn("MotionDirection::CounterClockwise", MAIN)
+        self.assertIn("value.sequence.startup_step = {", SETTINGS)
+        self.assertIn("MotionDirection::Clockwise", SETTINGS)
+        self.assertIn("MotionDirection::CounterClockwise", SETTINGS)
 
     def test_sequence_api_validates_count_steps_and_busy_state(self):
         self.assertIn('g_web_server.on("/api/sequence", HTTP_GET', MAIN)

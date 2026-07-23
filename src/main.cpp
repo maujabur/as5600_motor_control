@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <ArduinoOTA.h>
-#include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
@@ -11,6 +10,7 @@
 #include <HBridgeMotorDriver.h>
 #include <MotionCoordinator.h>
 #include <MotionSequenceController.h>
+#include <PreferencesSettingsStore.h>
 
 #include <ctype.h>
 #include <math.h>
@@ -115,140 +115,61 @@ uint32_t                g_move_debug_last_print_ms = 0;
 float clampf(float v, float lo, float hi);
 bool setPwmFrequencyHz(uint32_t hz);
 
-Preferences g_repetitive_preferences;
-bool g_repetitive_preferences_ready = false;
-bool g_repetitive_run_on_boot = false;
-bool g_persisted_repetitive_running = false;
+DeviceSettings g_settings = DeviceSettings::defaults();
+PreferencesSettingsStore g_settings_store;
+bool g_settings_store_ready = false;
 WebServer g_web_server(80);
 bool g_web_server_started = false;
 
-constexpr uint32_t SEQUENCE_STORAGE_VERSION = 1;
-struct StoredMotionSequence {
-  uint32_t version;
-  MotionSequenceConfig config;
-};
+void applyDeviceSettings(const DeviceSettings& settings) {
+  g_settings = settings;
+  g_position_servo.setSettings(g_settings.position);
+  g_sequence_motion.setConfig(g_settings.sequence);
+  g_power_limit_percent = g_settings.motor.power_limit_percent;
+  g_pwm_frequency_hz = g_settings.motor.pwm_frequency_hz;
+  g_angle_sensor.setFailureLimit(g_settings.sensor.failure_limit);
+  g_motor_driver.setSettings(g_settings.motor);
+}
+bool saveSettingsSnapshot() {
+  if (!g_settings_store_ready) return false;
+  return g_settings_store.save(g_settings);
+}
 
-void loadRepetitiveMotionPreferences() {
-  g_repetitive_preferences_ready =
-    g_repetitive_preferences.begin("repeat_motion", false);
-  if (!g_repetitive_preferences_ready) {
-    Serial.println("AVISO: nao foi possivel abrir a configuracao persistente do ciclo");
-    return;
+void loadDeviceSettings() {
+  g_settings_store_ready = g_settings_store.begin();
+  if (!g_settings_store_ready) {
+    Serial.println("AVISO: nao foi possivel abrir a configuracao persistente");
   }
-
-  AdrcPositionSettings adrc = g_position_servo.settings();
-  adrc.control_bandwidth = clampf(g_repetitive_preferences.getFloat(
-    "adrc_wc", adrc.control_bandwidth), 1.0f, 100.0f);
-  adrc.observer_bandwidth = clampf(g_repetitive_preferences.getFloat(
-    "adrc_wo", adrc.observer_bandwidth), 1.0f, 300.0f);
-  adrc.plant_gain = clampf(g_repetitive_preferences.getFloat(
-    "adrc_b0", adrc.plant_gain), 1.0f, 2000.0f);
-  adrc.max_target_rpm = clampf(g_repetitive_preferences.getFloat(
-    "max_rpm", adrc.max_target_rpm), 0.1f, 10.0f);
-  adrc.physical_max_rpm = clampf(g_repetitive_preferences.getFloat(
-    "phys_rpm", adrc.physical_max_rpm), 0.1f, 10.0f);
-  adrc.max_target_rpm = fminf(adrc.max_target_rpm, adrc.physical_max_rpm);
-  adrc.stop_window_deg = clampf(g_repetitive_preferences.getFloat(
-    "stop_win", adrc.stop_window_deg), 0.2f, 20.0f);
-  adrc.accel_ramp_ms = (uint16_t)constrain(
-    g_repetitive_preferences.getUInt("accel_ms", adrc.accel_ramp_ms), 50U, 2000U);
-  adrc.decel_ramp_ms = (uint16_t)constrain(
-    g_repetitive_preferences.getUInt("decel_ms", adrc.decel_ramp_ms), 50U, 2000U);
-  adrc.kick_pwm_percent = clampf(g_repetitive_preferences.getFloat(
-    "kick_pct", adrc.kick_pwm_percent), 0.0f, 100.0f);
-  adrc.kick_ms = (uint16_t)constrain(
-    g_repetitive_preferences.getUInt("kick_ms", adrc.kick_ms), 0U, 1000U);
-  adrc.samples_to_stop = (uint16_t)constrain(
-    g_repetitive_preferences.getUInt("stop_samples", adrc.samples_to_stop), 1U, 20U);
-  adrc.minimum_drive_pwm_percent = clampf(g_repetitive_preferences.getFloat(
-    "min_pwm", adrc.minimum_drive_pwm_percent), 0.0f, 45.0f);
-  adrc.stall_timeout_ms = (uint16_t)constrain(
-    g_repetitive_preferences.getUInt("stall_ms", adrc.stall_timeout_ms), 100U, 10000U);
-  adrc.stall_velocity_deg_s = clampf(g_repetitive_preferences.getFloat(
-    "stall_vel", adrc.stall_velocity_deg_s), 0.1f, 20.0f);
-  adrc.velocity_window_ms = (uint16_t)constrain(
-    g_repetitive_preferences.getUInt("vel_win", adrc.velocity_window_ms), 20U, 1000U);
-  adrc.velocity_num_samples = (uint8_t)constrain(
-    g_repetitive_preferences.getUInt("vel_samples", adrc.velocity_num_samples), 2U, 20U);
-  g_position_servo.setSettings(adrc);
-  g_power_limit_percent = (uint8_t)constrain(
-    g_repetitive_preferences.getUInt("power_limit", g_power_limit_percent), 0U, 100U);
-  g_pwm_frequency_hz = constrain(
-    g_repetitive_preferences.getUInt("pwm_hz", g_pwm_frequency_hz),
-    PWM_MIN_FREQUENCY_HZ, PWM_MAX_FREQUENCY_HZ);
-  g_angle_sensor.setFailureLimit((uint8_t)constrain(
-    g_repetitive_preferences.getUInt("sensor_fail", 3), 1U, 20U));
-
-  StoredMotionSequence stored{};
-  if (g_repetitive_preferences.getBytesLength("sequence") == sizeof(stored) &&
-      g_repetitive_preferences.getBytes("sequence", &stored, sizeof(stored)) == sizeof(stored) &&
-      stored.version == SEQUENCE_STORAGE_VERSION &&
-      stored.config.step_count >= 1 &&
-      stored.config.step_count <= MOTION_SEQUENCE_MAX_STEPS) {
-    g_sequence_motion.setConfig(stored.config);
-  } else {
-    MotionSequenceConfig sequence;
-    sequence.startup_step = {0.0f, 1.0f, 1000,
-                             MotionDirection::Shortest};
-    sequence.step_count = 2;
-    sequence.steps[0] = {180.0f, 1.0f, 2000,
-                         MotionDirection::Clockwise};
-    sequence.steps[1] = {0.0f, 1.0f, 1000,
-                         MotionDirection::CounterClockwise};
-    g_sequence_motion.setConfig(sequence);
-  }
-  g_repetitive_run_on_boot = g_repetitive_preferences.getBool("running", false);
-  g_persisted_repetitive_running = g_repetitive_run_on_boot;
-
+  applyDeviceSettings(g_settings_store_ready
+                        ? g_settings_store.load()
+                        : DeviceSettings::defaults());
 }
 
 void saveRepetitiveMotionConfig() {
-  if (!g_repetitive_preferences_ready) return;
-  StoredMotionSequence stored{SEQUENCE_STORAGE_VERSION, g_sequence_motion.config()};
-  g_repetitive_preferences.putBytes("sequence", &stored, sizeof(stored));
+  g_settings.sequence = g_sequence_motion.config();
+  saveSettingsSnapshot();
 }
 
 void saveAdrcSettings() {
-  if (!g_repetitive_preferences_ready) return;
-  const AdrcPositionSettings& s = g_position_servo.settings();
-  g_repetitive_preferences.putFloat("adrc_wc", s.control_bandwidth);
-  g_repetitive_preferences.putFloat("adrc_wo", s.observer_bandwidth);
-  g_repetitive_preferences.putFloat("adrc_b0", s.plant_gain);
+  g_settings.position = g_position_servo.settings();
+  saveSettingsSnapshot();
 }
 
 void saveControlSettings() {
-  if (!g_repetitive_preferences_ready) return;
-  const AdrcPositionSettings& s = g_position_servo.settings();
-  g_repetitive_preferences.putFloat("adrc_wc", s.control_bandwidth);
-  g_repetitive_preferences.putFloat("adrc_wo", s.observer_bandwidth);
-  g_repetitive_preferences.putFloat("adrc_b0", s.plant_gain);
-  g_repetitive_preferences.putFloat("max_rpm", s.max_target_rpm);
-  g_repetitive_preferences.putFloat("phys_rpm", s.physical_max_rpm);
-  g_repetitive_preferences.putFloat("stop_win", s.stop_window_deg);
-  g_repetitive_preferences.putUInt("accel_ms", s.accel_ramp_ms);
-  g_repetitive_preferences.putUInt("decel_ms", s.decel_ramp_ms);
-  g_repetitive_preferences.putFloat("kick_pct", s.kick_pwm_percent);
-  g_repetitive_preferences.putUInt("kick_ms", s.kick_ms);
-  g_repetitive_preferences.putUInt("stop_samples", s.samples_to_stop);
-  g_repetitive_preferences.putFloat("min_pwm", s.minimum_drive_pwm_percent);
-  g_repetitive_preferences.putUInt("stall_ms", s.stall_timeout_ms);
-  g_repetitive_preferences.putFloat("stall_vel", s.stall_velocity_deg_s);
-  g_repetitive_preferences.putUInt("vel_win", s.velocity_window_ms);
-  g_repetitive_preferences.putUInt("vel_samples", s.velocity_num_samples);
-  g_repetitive_preferences.putUInt("power_limit", g_power_limit_percent);
-  g_repetitive_preferences.putUInt("pwm_hz", g_pwm_frequency_hz);
-  g_repetitive_preferences.putUInt("sensor_fail", g_angle_sensor.failureLimit());
+  g_settings.position = g_position_servo.settings();
+  g_settings.sequence = g_sequence_motion.config();
+  g_settings.motor = g_motor_driver.settings();
+  g_settings.sensor.failure_limit = g_angle_sensor.failureLimit();
+  saveSettingsSnapshot();
 }
 
 void setRepetitiveRunning(bool running, bool persist = true) {
   g_sequence_motion.setRunning(running, millis());
-  if (persist && g_repetitive_preferences_ready &&
-      running != g_persisted_repetitive_running) {
-    g_repetitive_preferences.putBool("running", running);
-    g_persisted_repetitive_running = running;
+  if (persist && running != g_settings.running) {
+    g_settings.running = running;
+    saveSettingsSnapshot();
   }
 }
-
 bool parseWebNumber(const char* name, float* value) {
   if (!value || !g_web_server.hasArg(name)) return false;
   const String text = g_web_server.arg(name);
@@ -1022,28 +943,7 @@ void setup() {
   }
   delay(SERIAL_STARTUP_WAIT_MS);
 
-  AdrcPositionSettings pos_settings;
-
-  // ADRC: valores iniciais extraidos do prototipo V2.5. A escala de b0 segue
-  // PWM 8-bit internamente, embora a ponte H continue recebendo percentual.
-  pos_settings.control_bandwidth = 25.0f;
-  pos_settings.observer_bandwidth = 80.0f;
-  pos_settings.plant_gain = 250.0f;
-  
-  pos_settings.max_target_rpm = DEFAULT_MAX_TARGET_RPM;
-  pos_settings.physical_max_rpm = 3.0f;
-  pos_settings.stop_window_deg = 1.0f;
-  pos_settings.accel_ramp_ms = 250;
-  pos_settings.decel_ramp_ms = 220;
-  pos_settings.kick_pwm_percent = 85.0f;
-  pos_settings.kick_ms = 180;
-  pos_settings.samples_to_stop = 3;
-  pos_settings.velocity_window_ms = 400;
-  pos_settings.velocity_num_samples = 8;
-  pos_settings.minimum_drive_pwm_percent = 24.0f;
-  
-  g_position_servo.setSettings(pos_settings);
-  loadRepetitiveMotionPreferences();
+  loadDeviceSettings();
   setPwmFrequencyHz(g_pwm_frequency_hz);
 
   g_angle_sensor.begin(Wire, I2C_SDA_PIN, I2C_SCL_PIN, 400000);
@@ -1075,7 +975,7 @@ void setup() {
   }
   Serial.println("ADRC pronto (motor nominal 2 rpm)");
 
-  if (g_repetitive_run_on_boot) {
+  if (g_settings.running) {
     if (g_angle_sensor.active()) {
       Serial.println("Ciclo persistente: running=on; iniciando homing no ponto inicial");
       setRepetitiveRunning(true, false);

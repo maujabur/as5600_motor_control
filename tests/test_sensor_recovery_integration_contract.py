@@ -102,10 +102,14 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
     def test_failure_limit_is_persisted_and_validated(self):
         main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
         page = (ROOT / "src/control_settings_web_page.h").read_text(encoding="utf-8")
-        for token in ('getUInt("sensor_fail"', 'putUInt("sensor_fail"',
-                      'parseWebNumber("sensorFailures"',
-                      "setFailureLimit((uint8_t)lroundf(sensor_failures))"):
+        settings = (ROOT / "lib/settings/DeviceSettings.h").read_text(
+            encoding="utf-8")
+        for token in ('parseWebNumber("sensorFailures"',
+                      "setFailureLimit((uint8_t)lroundf(sensor_failures))",
+                      "g_settings.sensor.failure_limit"):
             self.assertIn(token, main)
+        self.assertIn("SensorSettings sensor", settings)
+        self.assertIn("value.sensor.failure_limit >= 1", settings)
         self.assertIn('id="sensorFailures"', page)
         self.assertIn("'sensorFailures'", page)
 
