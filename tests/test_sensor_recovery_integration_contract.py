@@ -9,6 +9,8 @@ SEQUENCE_H = (ROOT / "lib/sequence/MotionSequenceController.h").read_text(encodi
 SEQUENCE_CPP = (ROOT / "lib/sequence/MotionSequenceController.cpp").read_text(encoding="utf-8")
 COORDINATOR_H = ROOT / "lib/control/MotionCoordinator.h"
 COORDINATOR_CPP = ROOT / "lib/control/MotionCoordinator.cpp"
+APPLICATION_H = ROOT / "src/MotorControlApplication.h"
+APPLICATION_CPP = ROOT / "src/MotorControlApplication.cpp"
 
 
 class SensorRecoveryIntegrationContractTest(unittest.TestCase):
@@ -43,33 +45,33 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
                       "consumeRecoveredPauseMs", "cancelMove"):
             self.assertIn(token, source)
 
-    def test_main_uses_coordinator_and_no_recovery_state(self):
-        main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
-        self.assertIn("AngleSensorManager g_angle_sensor", main)
-        self.assertRegex(main, r"MotionCoordinator\s+g_motion_coordinator")
+    def test_application_uses_coordinator_and_no_recovery_state(self):
+        header = APPLICATION_H.read_text(encoding="utf-8")
+        application = APPLICATION_CPP.read_text(encoding="utf-8")
+        self.assertIn("AngleSensorManager sensor_", header)
+        self.assertRegex(header, r"MotionCoordinator\s+motion_")
         self.assertRegex(
-            main,
-            r"MotionSequenceController\s+g_sequence_motion\(g_motion_coordinator\)")
-        self.assertNotIn("As5600Sensor            g_as5600", main)
-        self.assertNotIn("g_as5600.", main)
+            header, r"MotionSequenceController\s+sequence_")
+        self.assertIn("sequence_(motion_)", application)
+        self.assertNotIn("As5600Sensor", application)
+        self.assertNotIn("g_as5600.", application)
         for token in ("g_sensor_pause_active", "g_sensor_loss_active",
                       "forceMotorSafeForSensorLoss", "readAngleSensorDeg"):
-            self.assertNotIn(token, main)
+            self.assertNotIn(token, application)
 
     def test_loop_updates_detection_before_motion_and_pwm(self):
-        main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
-        loop = main.split("void loop()", 1)[1]
+        application = APPLICATION_CPP.read_text(encoding="utf-8")
+        loop = application.split("void MotorControlApplication::update", 1)[1]
         order = [loop.index(token) for token in
-                 ("g_motion_coordinator.updateSensor",
-                  "g_sequence_motion.update",
-                  "g_motion_coordinator.updateControl")]
+                 ("motion_.updateSensor", "sequence_.update",
+                  "motion_.updateControl")]
         self.assertEqual(order, sorted(order))
 
     def test_sequence_state_is_frozen_only_during_sensor_loss(self):
         source = COORDINATOR_CPP.read_text(encoding="utf-8")
-        main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
-        loop = main.split("void loop()", 1)[1]
-        self.assertIn("if (!g_motion_coordinator.status().paused_for_sensor)", loop)
+        application = APPLICATION_CPP.read_text(encoding="utf-8")
+        loop = application.split("void MotorControlApplication::update", 1)[1]
+        self.assertIn("if (!motion_.status().paused_for_sensor)", loop)
         self.assertIn("consumeRecoveredPauseMs()", loop)
         self.assertIn("resumeAfterPause", loop)
         self.assertIn("paused_for_sensor = true", source)
@@ -100,7 +102,7 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
         self.assertNotIn("servo_.cancel()", body)
 
     def test_failure_limit_is_persisted_and_validated(self):
-        main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
+        application = APPLICATION_CPP.read_text(encoding="utf-8")
         page = (ROOT / "lib/web/control_settings_web_page.h").read_text(encoding="utf-8")
         settings = (ROOT / "lib/settings/DeviceSettings.h").read_text(
             encoding="utf-8")
@@ -110,8 +112,8 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
                       "(uint8_t)lroundf(sensor_failures)"):
             self.assertIn(token, web)
         self.assertIn(
-            "g_angle_sensor.setFailureLimit(g_settings.sensor.failure_limit)",
-            main)
+            "sensor_.setFailureLimit(settings_.sensor.failure_limit)",
+            application)
         self.assertIn("SensorSettings sensor", settings)
         self.assertIn("value.sensor.failure_limit >= 1", settings)
         self.assertIn('id="sensorFailures"', page)
@@ -131,7 +133,6 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
         self.assertIn("sensorState", page)
 
     def test_late_detection_logs_sensor_identity(self):
-        main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
         source = COORDINATOR_CPP.read_text(encoding="utf-8")
         self.assertIn("AngleSensorManager::State::Detecting", source)
         self.assertIn("sensor_.sensorName()", source)

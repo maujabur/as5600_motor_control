@@ -14,11 +14,13 @@ class DiagnosticsContractTest(unittest.TestCase):
             self.assertIn(token, source)
 
     def test_serial_is_output_only(self):
-        main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
-        self.assertNotIn("Serial.read", main)
-        self.assertNotIn("Serial.available", main)
-        self.assertNotIn("g_move_", main)
-        self.assertRegex(main, r"MotionTelemetry\s+g_telemetry")
+        application = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (ROOT / "src").glob("*") if path.is_file())
+        self.assertNotIn("Serial.read", application)
+        self.assertNotIn("Serial.available", application)
+        self.assertNotIn("g_move_", application)
+        self.assertRegex(application, r"MotionTelemetry\s+telemetry_")
 
 
 if __name__ == "__main__":

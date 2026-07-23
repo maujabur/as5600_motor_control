@@ -5,7 +5,7 @@ com realimentação por sensor magnético AS5600 ou MT6701, controle ADRC,
 configuração web, persistência em NVS e atualização OTA.
 
 O equipamento opera de forma autônoma depois de configurado. A serial é usada
-somente para logs; comandos recebidos são descartados.
+somente para logs e diagnóstico; o firmware não lê comandos pela serial.
 
 ## Funcionalidades
 
@@ -89,9 +89,10 @@ após a chegada e sentido. A tabela só pode ser alterada quando o ciclo, o serv
 e a atualização OTA estão parados. STOP cancela imediatamente movimento ou
 espera.
 
-Na primeira inicialização desta versão, uma configuração antiga de vai e volta
-é convertida em passo 0 mais dois passos cíclicos. A nova sequência é gravada
-como um bloco versionado na NVS ao ser salva pela interface.
+Esta arquitetura usa um único snapshot versionado (`motor_cfg_v2/snapshot`) na
+NVS. Não há migração das chaves antigas: após instalar esta versão, configure o
+equipamento uma vez pela interface web. Na ausência de um snapshot válido, o
+firmware inicia com valores seguros de fábrica.
 
 STOP cancela imediatamente homing, ajuste pontual ou ciclo automático e salva
 `running=off`.
@@ -198,7 +199,7 @@ O ambiente requer o PlatformIO Core gerenciado pelo VS Code, normalmente em:
 | Falhas do sensor (`sensorFailures`) | 3 |
 | Intervalo de redetecção do sensor | 1 s |
 
-Valores já gravados na NVS têm prioridade sobre esses defaults.
+Um snapshot válido da versão atual na NVS tem prioridade sobre esses defaults.
 
 ## Segurança e comissionamento
 
@@ -218,21 +219,40 @@ de potência da ponte H.
 ```text
 include/
   wifi_credentials.example.h
-lib/motion_control/
-  AngleSensor.h
-  AngleSensorManager.*
+lib/domain/
+  AngleMath.*
+  MotionExecutor.h
+  MotionTypes.h
+lib/sequence/
+  MotionSequenceController.*
+lib/control/
   AdrcPositionController.*
-  As5600Sensor.*
-  Mt6701Sensor.*
-  RepetitiveMotionController.*
   VelocityEstimator.*
-src/
-  main.cpp
+lib/hardware/
+  AngleSensor.*
+  AngleSensorManager.*
+  As5600Sensor.*
+  HBridgeMotorDriver.*
+  Mt6701Sensor.*
+  MotionCoordinator.*
+lib/settings/
+  DeviceSettings.*
+  PreferencesSettingsStore.*
+lib/web/
+  WebControlServer.*
   repetitive_motion_web_page.h
   control_settings_web_page.h
+lib/connectivity/
+  NetworkServices.*
+lib/diagnostics/
+  MotionTelemetry.*
+src/
+  MotorControlApplication.*
+  main.cpp
 platformio.ini
 ```
 
-`AdrcPositionController` contém o controle e as proteções do motor.
-`RepetitiveMotionController` implementa o ciclo sem conhecer hardware.
-`main.cpp` integra sensor, ponte H, NVS, Wi-Fi, páginas web e OTA.
+Cada diretório em `lib/` representa uma competência. `MotorControlApplication`
+compõe esses módulos, implementa as ações expostas ao painel e coordena a ordem
+do ciclo principal. `main.cpp` apenas encaminha `setup()` e `loop()` para essa
+aplicação.

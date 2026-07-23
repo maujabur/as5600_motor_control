@@ -6,7 +6,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEVICE_SETTINGS_H = ROOT / "lib/settings/DeviceSettings.h"
 STORE_H = ROOT / "lib/settings/PreferencesSettingsStore.h"
 STORE_CPP = ROOT / "lib/settings/PreferencesSettingsStore.cpp"
-MAIN = ROOT / "src/main.cpp"
+APPLICATION_H = ROOT / "src/MotorControlApplication.h"
+APPLICATION_CPP = ROOT / "src/MotorControlApplication.cpp"
 
 
 class SettingsStoreContractTest(unittest.TestCase):
@@ -25,14 +26,15 @@ class SettingsStoreContractTest(unittest.TestCase):
         self.assertIn('putBytes("snapshot"', source)
         self.assertIn('getBytesLength("snapshot")', source)
 
-    def test_main_has_no_legacy_key_level_persistence(self):
-        main = MAIN.read_text(encoding="utf-8")
+    def test_application_has_no_legacy_key_level_persistence(self):
+        application = APPLICATION_CPP.read_text(encoding="utf-8")
+        header = APPLICATION_H.read_text(encoding="utf-8")
         for token in ('getFloat("adrc_wc"', 'putFloat("adrc_wc"',
                       'getBytes("sequence"', 'putBool("running"'):
-            self.assertNotIn(token, main)
-        self.assertNotIn("Preferences g_repetitive_preferences", main)
-        self.assertIn("DeviceSettings g_settings", main)
-        self.assertIn("PreferencesSettingsStore g_settings_store", main)
+            self.assertNotIn(token, application)
+        self.assertNotIn("Preferences g_repetitive_preferences", application)
+        self.assertIn("DeviceSettings settings_", header)
+        self.assertIn("PreferencesSettingsStore settings_store_", header)
 
 
 if __name__ == "__main__":

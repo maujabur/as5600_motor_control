@@ -18,13 +18,16 @@ class NetworkServicesContractTest(unittest.TestCase):
                       "12000", "1500", "{1, 6, 11}"):
             self.assertIn(token, source)
 
-    def test_main_uses_boundary_instead_of_framework_calls(self):
-        main = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
+    def test_application_uses_boundary_instead_of_framework_calls(self):
+        application = (ROOT / "src/MotorControlApplication.cpp").read_text(
+            encoding="utf-8")
+        header = (ROOT / "src/MotorControlApplication.h").read_text(
+            encoding="utf-8")
         for token in ("WiFi.begin", "WiFi.softAP", "ArduinoOTA.onStart",
                       "ArduinoOTA.handle", "esp_wifi_set_channel"):
-            self.assertNotIn(token, main)
-        self.assertIn("NetworkServices g_network", main)
-        self.assertIn("void MainNetworkEvents::onOtaStart", main)
+            self.assertNotIn(token, application)
+        self.assertIn("NetworkServices network_", header)
+        self.assertIn("void MotorControlApplication::onOtaStart", application)
 
 
 if __name__ == "__main__":
