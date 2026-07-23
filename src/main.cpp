@@ -1,7 +1,4 @@
 #include <Arduino.h>
-#include <ArduinoOTA.h>
-#include <WiFi.h>
-#include <esp_wifi.h>
 
 #include <AngleMath.h>
 #include <AngleSensorManager.h>
@@ -9,6 +6,7 @@
 #include <HBridgeMotorDriver.h>
 #include <MotionCoordinator.h>
 #include <MotionSequenceController.h>
+#include <NetworkServices.h>
 #include <PreferencesSettingsStore.h>
 #include <WebControlServer.h>
 
@@ -32,18 +30,9 @@ static_assert(MOTOR_CONTROL_UNIT >= 1 && MOTOR_CONTROL_UNIT <= 99,
               "MOTOR_CONTROL_UNIT deve estar entre 1 e 99");
 
 constexpr uint8_t MOTOR_CONTROL_UNIT_NUMBER = MOTOR_CONTROL_UNIT;
-char OTA_AP_SSID[20] = {0};
 constexpr char OTA_AP_PASSWORD[] = "+5511981550110";
-char OTA_HOSTNAME[28] = {0};
 constexpr char OTA_PASSWORD[]    = "as5600-update";
-constexpr uint32_t WIFI_STA_CONNECT_TIMEOUT_MS = 12000;
-// Para seis unidades: 01/04 -> canal 1, 02/05 -> canal 6, 03/06 -> canal 11.
-// Os tres canais nao se sobrepoem e recebem exatamente duas unidades cada.
-constexpr uint8_t WIFI_AP_CHANNEL_SLOT = (MOTOR_CONTROL_UNIT_NUMBER - 1U) % 3U;
-constexpr uint8_t WIFI_AP_CHANNEL = WIFI_AP_CHANNEL_SLOT == 0U ? 1U
-                                    : WIFI_AP_CHANNEL_SLOT == 1U ? 6U : 11U;
 constexpr uint8_t OTA_BUTTON_PIN = 7;
-constexpr uint32_t OTA_BUTTON_HOLD_MS = 1500;
 
 // Waveshare ESP32-S3-Zero + L298N
 // IN1/IN2 = motor A,  IN3/IN4 = motor B  (A é o padrao deste projeto)
@@ -66,11 +55,6 @@ constexpr uint8_t  I2C_SCL_PIN            = 6;
 constexpr float    DEFAULT_MOVE_MAX_RPM   = 1.8f;
 constexpr float    DEFAULT_MAX_TARGET_RPM = 2.4f;
 float              g_default_move_max_rpm = DEFAULT_MOVE_MAX_RPM;
-
-bool g_ota_mode_active = false;
-bool g_ota_update_in_progress = false;
-bool g_ota_button_pressed = false;
-uint32_t g_ota_button_pressed_ms = 0;
 
 AngleSensorManager g_angle_sensor;
 AdrcPositionController   g_position_servo;
@@ -115,6 +99,17 @@ bool setPwmFrequencyHz(uint32_t hz);
 DeviceSettings g_settings = DeviceSettings::defaults();
 PreferencesSettingsStore g_settings_store;
 bool g_settings_store_ready = false;
+
+class MainNetworkEvents final : public NetworkServiceEvents {
+ public:
+  void onOtaStart() override;
+};
+
+MainNetworkEvents g_network_events;
+NetworkServices g_network({
+  MOTOR_CONTROL_UNIT_NUMBER, OTA_BUTTON_PIN,
+  WIFI_STA_SSID, WIFI_STA_PASSWORD, OTA_AP_PASSWORD, OTA_PASSWORD},
+  g_network_events);
 
 class MainWebActions final : public WebControlActions {
  public:
@@ -199,7 +194,7 @@ ApplicationStatus MainWebActions::status() const {
   value.sensor_failures = g_angle_sensor.failureCount();
   value.angle_deg = motion.angle_deg;
   value.max_rpm = g_position_servo.settings().max_target_rpm;
-  value.ota_busy = g_ota_update_in_progress;
+  value.ota_busy = g_network.otaBusy();
   value.stalled = g_adrc_stall_fault;
   return value;
 }
@@ -221,7 +216,7 @@ OperationResult MainWebActions::replaceSettings(
 }
 
 OperationResult MainWebActions::setRunning(bool running) {
-  if (g_ota_update_in_progress) {
+  if (g_network.otaBusy()) {
     return {false, 409, "Atualizacao OTA em andamento"};
   }
   if (running && !g_motion_coordinator.status().sensor_available) {
@@ -234,7 +229,7 @@ OperationResult MainWebActions::setRunning(bool running) {
 
 OperationResult MainWebActions::manualMove(const MotionRequest& request) {
   if (g_sequence_motion.running() || g_position_servo.isActive() ||
-      g_ota_update_in_progress) {
+      g_network.otaBusy()) {
     return {false, 409,
             "Movimento avulso permitido somente com o motor parado"};
   }
@@ -254,7 +249,7 @@ OperationResult MainWebActions::adjustTo(bool startup_position) {
   if (g_sequence_motion.running() || g_position_servo.isActive()) {
     return {false, 409, "Ajuste permitido somente com o motor parado"};
   }
-  if (g_ota_update_in_progress) {
+  if (g_network.otaBusy()) {
     return {false, 409, "Atualizacao OTA em andamento"};
   }
   if (!g_motion_coordinator.status().sensor_available) {
@@ -480,146 +475,9 @@ void stopMotorForOta() {
   g_motion_coordinator.cancelMove();
 }
 
-bool setupOtaAndWebServices() {
-  ArduinoOTA.setHostname(OTA_HOSTNAME);
-  ArduinoOTA.setPassword(OTA_PASSWORD);
-  ArduinoOTA.onStart([]() {
-    g_ota_update_in_progress = true;
-    stopMotorForOta();
-    Serial.println("OTA: atualizacao iniciada; motores desativados");
-  });
-  ArduinoOTA.onEnd([]() {
-    Serial.println("\nOTA: atualizacao concluida; reiniciando");
-  });
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    const unsigned int percent = total == 0 ? 0 : (progress * 100U) / total;
-    Serial.printf("\rOTA: %u%%", percent);
-  });
-  ArduinoOTA.onError([](ota_error_t error) {
-    Serial.printf("\nOTA: erro %u; reinicie a placa antes de operar o motor\n",
-                  (unsigned int)error);
-  });
-  ArduinoOTA.begin();
-  g_web_server.begin();
-
-  return true;
+void MainNetworkEvents::onOtaStart() {
+  stopMotorForOta();
 }
-
-bool setupOtaAccessPoint() {
-  snprintf(OTA_AP_SSID, sizeof(OTA_AP_SSID), "Motor-Control-%02u",
-           MOTOR_CONTROL_UNIT_NUMBER);
-  WiFi.mode(WIFI_AP);
-  if (!WiFi.softAP(OTA_AP_SSID, OTA_AP_PASSWORD, WIFI_AP_CHANNEL)) {
-    Serial.println("OTA: falha ao criar ponto de acesso");
-    return false;
-  }
-
-  // HT40 pode fazer alguns scanners mostrarem o canal central (por exemplo 9
-  // para um AP cujo canal primario e 11). Fixamos HT20 e reafirmamos o canal.
-  if (!WiFi.softAPbandwidth(WIFI_BW_HT20)) {
-    Serial.println("OTA/WEB: falha ao fixar largura WiFi em 20 MHz");
-    WiFi.softAPdisconnect(true);
-    return false;
-  }
-  const esp_err_t channel_result =
-    esp_wifi_set_channel(WIFI_AP_CHANNEL, WIFI_SECOND_CHAN_NONE);
-  if (channel_result != ESP_OK) {
-    Serial.printf("OTA/WEB: falha ao fixar canal WiFi: %s\n",
-                  esp_err_to_name(channel_result));
-    WiFi.softAPdisconnect(true);
-    return false;
-  }
-
-  uint8_t actual_channel = 0;
-  wifi_second_chan_t actual_secondary = WIFI_SECOND_CHAN_NONE;
-  wifi_bandwidth_t actual_bandwidth = WIFI_BW_HT20;
-  const esp_err_t channel_read_result =
-    esp_wifi_get_channel(&actual_channel, &actual_secondary);
-  const esp_err_t bandwidth_read_result =
-    esp_wifi_get_bandwidth(WIFI_IF_AP, &actual_bandwidth);
-  if (channel_read_result != ESP_OK || bandwidth_read_result != ESP_OK ||
-      actual_channel != WIFI_AP_CHANNEL || actual_secondary != WIFI_SECOND_CHAN_NONE ||
-      actual_bandwidth != WIFI_BW_HT20) {
-    Serial.printf("OTA/WEB: configuracao WiFi divergente (canal=%u secundario=%d largura=%d)\n",
-                  actual_channel, (int)actual_secondary, (int)actual_bandwidth);
-    WiFi.softAPdisconnect(true);
-    return false;
-  }
-
-  setupOtaAndWebServices();
-
-  Serial.printf("OTA/WEB AP: SSID=%s  canal=%u  largura=20MHz  IP=%s  OTA=3232 WEB=80\n",
-                OTA_AP_SSID, actual_channel, WiFi.softAPIP().toString().c_str());
-  return true;
-}
-
-bool setupStationOrAccessPoint() {
-  snprintf(OTA_AP_SSID, sizeof(OTA_AP_SSID), "Motor-Control-%02u",
-           MOTOR_CONTROL_UNIT_NUMBER);
-  snprintf(OTA_HOSTNAME, sizeof(OTA_HOSTNAME), "as5600-motor-%02u",
-           MOTOR_CONTROL_UNIT_NUMBER);
-
-  if (strlen(WIFI_STA_SSID) > 0) {
-    Serial.printf("WiFi: conectando a %s", WIFI_STA_SSID);
-    WiFi.mode(WIFI_STA);
-    WiFi.setHostname(OTA_HOSTNAME);
-    WiFi.begin(WIFI_STA_SSID, WIFI_STA_PASSWORD);
-    const uint32_t started_ms = millis();
-    while (WiFi.status() != WL_CONNECTED &&
-           millis() - started_ms < WIFI_STA_CONNECT_TIMEOUT_MS) {
-      delay(250);
-      Serial.print('.');
-    }
-    Serial.println();
-
-    if (WiFi.status() == WL_CONNECTED) {
-      setupOtaAndWebServices();
-      Serial.printf("OTA/WEB STA: SSID=%s  IP=%s  OTA=3232 WEB=80\n",
-                    WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
-      return true;
-    }
-
-    Serial.println("WiFi: rede nao encontrada; iniciando AP de contingencia");
-    WiFi.disconnect(true);
-    delay(100);
-  } else {
-    Serial.println("WiFi: credenciais STA ausentes; iniciando AP de contingencia");
-  }
-
-  return setupOtaAccessPoint();
-}
-
-void handleOtaMaintenanceMode() {
-  if (g_ota_mode_active) {
-    ArduinoOTA.handle();
-    g_web_server.handleClient();
-    return;
-  }
-
-  const bool button_pressed = digitalRead(OTA_BUTTON_PIN) == LOW;
-  if (!button_pressed) {
-    g_ota_button_pressed = false;
-    return;
-  }
-
-  const uint32_t now = millis();
-  if (!g_ota_button_pressed) {
-    g_ota_button_pressed = true;
-    g_ota_button_pressed_ms = now;
-    return;
-  }
-
-  if (now - g_ota_button_pressed_ms < OTA_BUTTON_HOLD_MS) {
-    return;
-  }
-
-  g_ota_mode_active = true;
-  Serial.println("OTA/WEB: ativando AP; controle do motor permanece disponivel");
-  if (!setupOtaAccessPoint()) {
-    Serial.println("OTA/WEB: falha ao ativar AP");
-  }
-}
-
 // ─── texto de estado ────────────────────────────────────────────────────────
 
 // ─── setup / loop ───────────────────────────────────────────────────────────
@@ -639,26 +497,16 @@ void setup() {
   setPwmFrequencyHz(g_pwm_frequency_hz);
 
   g_angle_sensor.begin(Wire, I2C_SDA_PIN, I2C_SCL_PIN, 400000);
-
-  pinMode(OTA_BUTTON_PIN, INPUT_PULLUP);
-
-  WiFi.mode(WIFI_OFF);
-
-  // Tenta a rede local primeiro. Se ela nao estiver disponivel, cria o AP de
-  // contingencia. Somente uma transferencia OTA interrompe o motor.
-  g_ota_mode_active = setupStationOrAccessPoint();
+  if (g_network.begin()) {
+    g_web_server.begin();
+  } else {
+    Serial.println("ERRO: rede, painel web e OTA indisponiveis");
+  }
 
   Serial.println("\n=== Motor PWM Tester ===");
   Serial.println("Placa: Waveshare ESP32-S3-Zero  |  Motor padrao: IN3/IN4");
   Serial.printf("PWM: freq=%u Hz  resolucao=%u bits\n", g_pwm_frequency_hz, PWM_RESOLUTION_BITS);
   Serial.printf("I2C: SDA=%u SCL=%u\n", I2C_SDA_PIN, I2C_SCL_PIN);
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("WiFi: conectado a %s  painel=http://%s/\n",
-                  WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
-  } else {
-    Serial.printf("WiFi: AP de contingencia  SSID=%s  canal=%u  painel=http://192.168.4.1/\n",
-                  OTA_AP_SSID, WIFI_AP_CHANNEL);
-  }
   if (g_angle_sensor.active()) {
     Serial.printf("%s detectado no endereco 0x%02X\n",
                   g_angle_sensor.sensorName(), g_angle_sensor.sensorAddress());
@@ -681,11 +529,11 @@ void setup() {
 }
 
 void loop() {
-  handleOtaMaintenanceMode();
-
   // Mantem a serial exclusivamente para logs; qualquer entrada e descartada.
   while (Serial.available() > 0) Serial.read();
   const uint32_t now_ms = millis();
+  g_network.update(now_ms);
+  g_web_server.handleClient();
   g_motion_coordinator.updateSensor(now_ms);
   const uint32_t recovered_pause_ms =
     g_motion_coordinator.consumeRecoveredPauseMs();
@@ -697,7 +545,7 @@ void loop() {
   }
   if (g_run_when_sensor_detected &&
       g_motion_coordinator.status().sensor_available &&
-      !g_ota_update_in_progress) {
+      !g_network.otaBusy()) {
     g_run_when_sensor_detected = false;
     setRepetitiveRunning(true, false);
     Serial.println("Sensor detectado; iniciando ciclo persistente");
