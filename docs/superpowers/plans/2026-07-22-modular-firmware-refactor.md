@@ -6,7 +6,7 @@
 
 **Architecture:** O domínio angular e os tipos de movimento serão independentes de Arduino. Uma fachada de movimento coordenará sensor, ADRC e ponte H; o sequenciador consumirá essa fachada; aplicação, web, persistência e conectividade dependerão de interfaces estreitas e snapshots tipados. `main.cpp` terminará apenas encaminhando `setup()` e `loop()` para `MotorControlApplication`.
 
-**Tech Stack:** C++17/Arduino, PlatformIO, ESP32-S3, Arduino `Preferences`, `WebServer`, `WiFi`, `ArduinoOTA`, testes Python `unittest`, testes nativos PlatformIO/Unity.
+**Tech Stack:** C++17/Arduino, PlatformIO, ESP32-S3, Arduino `Preferences`, `WebServer`, `WiFi`, `ArduinoOTA`, testes Python `unittest`, testes C++ puros compilados com MSVC 2022.
 
 ## Global Constraints
 
@@ -17,7 +17,7 @@
 - Não alterar os defaults nem a sintonia ADRC durante a refatoração.
 - Não preservar comandos seriais interativos nem o formato NVS anterior.
 - Cada tarefa termina com testes e build do ambiente `waveshare_esp32_s3_zero` passando.
-- Não adicionar bibliotecas externas além do framework e do Unity fornecido pelo PlatformIO.
+- Não adicionar bibliotecas externas além do framework Arduino.
 
 ## Mapa final de arquivos
 
@@ -48,9 +48,10 @@ lib/diagnostics/
 src/
   MotorControlApplication.h/.cpp composição e casos de uso
   main.cpp                     encaminhamento setup/loop
-tests/native/
-  test_angle_math/test_main.cpp
-  test_motion_sequence/test_main.cpp
+tests/cpp/
+  test_angle_math.cpp
+  test_motion_sequence.cpp
+tests/run_cpp_tests.cmd
 tests/
   test_web_contract.py
   test_application_contract.py
@@ -65,8 +66,8 @@ tests/
 - Create: `lib/domain/AngleMath.cpp`
 - Create: `lib/domain/MotionTypes.h`
 - Create: `lib/domain/MotionExecutor.h`
-- Create: `tests/native/test_angle_math/test_main.cpp`
-- Modify: `platformio.ini`
+- Create: `tests/cpp/test_angle_math.cpp`
+- Create: `tests/run_cpp_tests.cmd`
 - Modify: `lib/motion_control/VelocityEstimator.h`
 - Modify: `lib/motion_control/VelocityEstimator.cpp`
 - Modify: `lib/motion_control/AdrcPositionController.h`
@@ -78,68 +79,46 @@ tests/
 - Produces: `AngleMath::normalize(float)`, `AngleMath::shortestDelta(float,float)`, `AngleMath::directedDelta(float,float,MotionDirection)`, `AngleMath::unwrap(float,float)`, `MotionRequest`, `MotionStep`, `MotionSequenceConfig`, and `MotionExecutor`.
 - Consumes: no project module; only `<stdint.h>` and `<math.h>`.
 
-- [ ] **Step 1: Add the native test environment and failing angle tests**
+- [ ] **Step 1: Add the failing MSVC angle tests**
 
-Append this environment to `platformio.ini`:
-
-```ini
-[platformio]
-test_dir = tests/native
-
-[env:native]
-platform = native
-test_framework = unity
-build_src_filter = -<*>
-```
-
-Add `test_dir` to the existing `[platformio]` section; do not create a second
-section with the same name.
-
-Create `tests/native/test_angle_math/test_main.cpp`:
+Create `tests/cpp/test_angle_math.cpp` and `tests/run_cpp_tests.cmd` with the
+standalone assertions and MSVC invocation recorded in the implementation
+commit. The runner initializes `vcvars64.bat`, compiles the test plus
+`lib/domain/AngleMath.cpp` into `.pio/msvc-tests`, and executes the binary.
 
 ```cpp
-#include <unity.h>
+#include <cmath>
+#include <cstdlib>
+#include <iostream>
 #include <AngleMath.h>
 
-void test_normalize_wraps_both_directions() {
-  TEST_ASSERT_FLOAT_WITHIN(0.001f, 10.0f, AngleMath::normalize(370.0f));
-  TEST_ASSERT_FLOAT_WITHIN(0.001f, 350.0f, AngleMath::normalize(-10.0f));
-  TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, AngleMath::normalize(360.0f));
+void expectNear(float expected, float actual, const char* message) {
+  if (std::fabs(expected - actual) <= 0.001f) return;
+  std::cerr << message << ": expected " << expected << ", got " << actual;
+  std::exit(1);
 }
 
-void test_shortest_delta_crosses_zero() {
-  TEST_ASSERT_FLOAT_WITHIN(0.001f, 20.0f,
-                           AngleMath::shortestDelta(350.0f, 10.0f));
-  TEST_ASSERT_FLOAT_WITHIN(0.001f, -20.0f,
-                           AngleMath::shortestDelta(10.0f, 350.0f));
-}
-
-void test_directed_delta_obeys_requested_direction() {
-  TEST_ASSERT_FLOAT_WITHIN(0.001f, 340.0f,
-      AngleMath::directedDelta(10.0f, 350.0f, MotionDirection::Clockwise));
-  TEST_ASSERT_FLOAT_WITHIN(0.001f, -340.0f,
-      AngleMath::directedDelta(350.0f, 10.0f,
-                               MotionDirection::CounterClockwise));
-}
-
-void test_unwrap_preserves_accumulated_turns() {
-  TEST_ASSERT_FLOAT_WITHIN(0.001f, 370.0f, AngleMath::unwrap(350.0f, 10.0f));
-  TEST_ASSERT_FLOAT_WITHIN(0.001f, -10.0f, AngleMath::unwrap(10.0f, 350.0f));
-}
-
-int main(int, char**) {
-  UNITY_BEGIN();
-  RUN_TEST(test_normalize_wraps_both_directions);
-  RUN_TEST(test_shortest_delta_crosses_zero);
-  RUN_TEST(test_directed_delta_obeys_requested_direction);
-  RUN_TEST(test_unwrap_preserves_accumulated_turns);
-  return UNITY_END();
+int main() {
+  expectNear(10.0f, AngleMath::normalize(370.0f), "positive wrap");
+  expectNear(350.0f, AngleMath::normalize(-10.0f), "negative wrap");
+  expectNear(20.0f, AngleMath::shortestDelta(350.0f, 10.0f),
+             "clockwise across zero");
+  expectNear(-20.0f, AngleMath::shortestDelta(10.0f, 350.0f),
+             "counter-clockwise across zero");
+  expectNear(340.0f, AngleMath::directedDelta(
+      10.0f, 350.0f, MotionDirection::Clockwise), "forced clockwise");
+  expectNear(-340.0f, AngleMath::directedDelta(
+      350.0f, 10.0f, MotionDirection::CounterClockwise),
+      "forced counter-clockwise");
+  expectNear(370.0f, AngleMath::unwrap(350.0f, 10.0f), "unwrap up");
+  expectNear(-10.0f, AngleMath::unwrap(10.0f, 350.0f), "unwrap down");
+  return 0;
 }
 ```
 
-- [ ] **Step 2: Run the focused native test and verify failure**
+- [ ] **Step 2: Run the focused C++ test and verify failure**
 
-Run: `pio test -e native -f test_angle_math`
+Run: `tests\\run_cpp_tests.cmd`
 
 Expected: FAIL because `AngleMath.h` and `MotionDirection` do not exist.
 
@@ -259,7 +238,7 @@ Remove the duplicate `MotionDirection`, `MotionStep`, and
 
 - [ ] **Step 5: Run domain tests, Python contracts, and firmware build**
 
-Run: `pio test -e native -f test_angle_math`
+Run: `tests\\run_cpp_tests.cmd`
 
 Expected: 4 tests PASS.
 
@@ -284,7 +263,7 @@ git commit -m "refactor: centralize angular motion domain"
 **Files:**
 - Create: `lib/sequence/MotionSequenceController.h`
 - Create: `lib/sequence/MotionSequenceController.cpp`
-- Create: `tests/native/test_motion_sequence/test_main.cpp`
+- Create: `tests/cpp/test_motion_sequence.cpp`
 - Modify: `src/main.cpp`
 - Modify: `tests/test_sequence_controller_contract.py`
 - Delete: `lib/motion_control/MotionSequenceController.h`
@@ -299,11 +278,23 @@ git commit -m "refactor: centralize angular motion domain"
 
 - [ ] **Step 1: Write a behavior test with a fake executor**
 
-Create `tests/native/test_motion_sequence/test_main.cpp`:
+Create `tests/cpp/test_motion_sequence.cpp`:
 
 ```cpp
-#include <unity.h>
+#include <cmath>
+#include <cstdlib>
+#include <iostream>
 #include <MotionSequenceController.h>
+
+void expect(bool condition, const char* message) {
+  if (condition) return;
+  std::cerr << message << '\n';
+  std::exit(1);
+}
+
+void expectNear(float expected, float actual, const char* message) {
+  expect(std::fabs(expected - actual) <= 0.001f, message);
+}
 
 class FakeExecutor final : public MotionExecutor {
  public:
@@ -343,19 +334,21 @@ void test_startup_move_dwell_and_stop() {
   const MotionSequenceConfig config = baseConfig();
   controller.setConfig(config);
   controller.setRunning(true, 100);
-  TEST_ASSERT_EQUAL_UINT8(0, controller.currentStep());
-  TEST_ASSERT_EQUAL(MotionSequenceController::Phase::MOVING, controller.phase());
-  TEST_ASSERT_FLOAT_WITHIN(0.001f, 5.0f, fake.last_request.target_deg);
+  expect(controller.currentStep() == 0, "startup step index");
+  expect(controller.phase() == MotionSequenceController::Phase::MOVING,
+         "startup moving phase");
+  expectNear(5.0f, fake.last_request.target_deg, "startup target");
 
   fake.active = false;
   controller.update(200);
-  TEST_ASSERT_EQUAL(MotionSequenceController::Phase::DWELLING, controller.phase());
+  expect(controller.phase() == MotionSequenceController::Phase::DWELLING,
+         "startup dwell phase");
   controller.update(200 + config.startup_step.dwell_ms);
-  TEST_ASSERT_EQUAL_UINT8(1, controller.currentStep());
+  expect(controller.currentStep() == 1, "first cyclic step");
 
   controller.stop();
-  TEST_ASSERT_FALSE(controller.running());
-  TEST_ASSERT_TRUE(fake.cancelled);
+  expect(!controller.running(), "controller stopped");
+  expect(fake.cancelled, "executor cancelled");
 }
 
 void test_zero_dwell_continues_without_stopping() {
@@ -368,26 +361,27 @@ void test_zero_dwell_continues_without_stopping() {
   fake.active = false;
   controller.update(1);
   controller.update(1);
-  TEST_ASSERT_EQUAL_UINT8(1, controller.currentStep());
+  expect(controller.currentStep() == 1, "first zero-dwell step");
   fake.active = true;
   fake.near_target = true;
   fake.retarget_result = true;
   controller.update(2);
-  TEST_ASSERT_EQUAL_UINT8(2, controller.currentStep());
-  TEST_ASSERT_EQUAL(MotionSequenceController::Phase::MOVING, controller.phase());
+  expect(controller.currentStep() == 2, "retargeted second step");
+  expect(controller.phase() == MotionSequenceController::Phase::MOVING,
+         "retarget remains moving");
 }
 
-int main(int, char**) {
-  UNITY_BEGIN();
-  RUN_TEST(test_startup_move_dwell_and_stop);
-  RUN_TEST(test_zero_dwell_continues_without_stopping);
-  return UNITY_END();
+int main() {
+  test_startup_move_dwell_and_stop();
+  test_zero_dwell_continues_without_stopping();
+  std::cout << "motion sequence tests passed\n";
+  return 0;
 }
 ```
 
 - [ ] **Step 2: Verify the new sequencer test fails**
 
-Run: `pio test -e native -f test_motion_sequence`
+Run: `tests\\run_cpp_tests.cmd motion_sequence`
 
 Expected: FAIL because the sequencer still uses callback structs and is not in
 `lib/sequence`.
@@ -449,7 +443,7 @@ Update `tests/test_sequence_controller_contract.py` paths to `lib/sequence` and
 assert the header contains `MotionExecutor& executor_`. Remove assertions that
 require callback typedefs.
 
-Run: `pio test -e native -f test_motion_sequence`
+Run: `tests\\run_cpp_tests.cmd motion_sequence`
 
 Expected: all sequencer tests PASS.
 
@@ -680,7 +674,7 @@ Run: `python -m unittest discover -s tests -p "test_*.py"`
 
 Expected: all recovery and sensor contracts PASS.
 
-Run: `pio test -e native -f test_angle_math -f test_motion_sequence`
+Run: `tests\\run_cpp_tests.cmd all`
 
 Expected: all native tests PASS.
 
@@ -1180,7 +1174,7 @@ Run: `python -m unittest discover -s tests -p "test_*.py"`
 
 Expected: all Python tests PASS.
 
-Run: `pio test -e native`
+Run: `tests\\run_cpp_tests.cmd all`
 
 Expected: all native tests PASS.
 
@@ -1218,7 +1212,7 @@ Run:
 
 ```powershell
 python -m unittest discover -s tests -p "test_*.py"
-pio test -e native
+tests\run_cpp_tests.cmd all
 pio run -e waveshare_esp32_s3_zero
 git diff --check
 git status --short

@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 
+#include <MotionTypes.h>
+
 #include "VelocityEstimator.h"
 
 struct AdrcPositionSettings {
@@ -30,16 +32,14 @@ struct AdrcPositionSettings {
 
 class AdrcPositionController {
  public:
-  enum class MoveDirection { Shortest, Clockwise, CounterClockwise };
-
   void setSettings(const AdrcPositionSettings& settings);
   const AdrcPositionSettings& settings() const { return settings_; }
 
   void startMove(float target_deg, float max_speed_rpm,
-                 MoveDirection direction = MoveDirection::Shortest);
+                 MotionDirection direction = MotionDirection::Shortest);
   bool retargetMove(float target_deg, float max_speed_rpm,
-                    MoveDirection direction = MoveDirection::Shortest);
-  bool setPendingDirection(MoveDirection direction);
+                    MotionDirection direction = MotionDirection::Shortest);
+  bool setPendingDirection(MotionDirection direction);
   void cancel();
   void primeAccumulatedAngle(float current_deg);
   void resumeAtAngle(float current_deg, uint32_t now_ms);
@@ -66,8 +66,6 @@ class AdrcPositionController {
   float estimatedDisturbance() const { return z3_; }
 
  private:
-  static float normalize360(float deg);
-  static float shortestDelta(float from_deg, float to_deg);
   void resetObserver(float position_deg, uint32_t now_ms);
 
   AdrcPositionSettings settings_;
@@ -80,7 +78,7 @@ class AdrcPositionController {
   bool observer_initialized_ = false;
 
   float target_deg_ = 0.0f;
-  MoveDirection direction_ = MoveDirection::Shortest;
+  MotionDirection direction_ = MotionDirection::Shortest;
   float target_accumulated_deg_ = 0.0f;
   float current_accumulated_deg_ = 0.0f;
   float last_current_deg_normalized_ = 0.0f;

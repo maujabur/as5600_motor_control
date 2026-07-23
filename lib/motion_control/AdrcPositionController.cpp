@@ -1,5 +1,7 @@
 #include "AdrcPositionController.h"
 
+#include <AngleMath.h>
+
 #include <math.h>
 
 void AdrcPositionController::setSettings(const AdrcPositionSettings& settings) {
@@ -9,9 +11,9 @@ void AdrcPositionController::setSettings(const AdrcPositionSettings& settings) {
 }
 
 void AdrcPositionController::startMove(float target_deg, float max_speed_rpm,
-                                       MoveDirection direction) {
+                                       MotionDirection direction) {
   direction_ = direction;
-  target_deg_ = normalize360(target_deg);
+  target_deg_ = AngleMath::normalize(target_deg);
   target_accumulated_deg_ = target_deg;
   max_speed_rpm_ = constrain(max_speed_rpm, 0.1f,
                              fminf(settings_.max_target_rpm,
@@ -35,26 +37,26 @@ void AdrcPositionController::startMove(float target_deg, float max_speed_rpm,
 
 bool AdrcPositionController::retargetMove(float target_deg,
                                           float max_speed_rpm,
-                                          MoveDirection direction) {
+                                          MotionDirection direction) {
   if (!active_ || !accumulated_initialized_) return false;
   direction_ = direction;
-  target_deg_ = normalize360(target_deg);
+  target_deg_ = AngleMath::normalize(target_deg);
   max_speed_rpm_ = constrain(max_speed_rpm, 0.1f,
                              fminf(settings_.max_target_rpm,
                                    settings_.physical_max_rpm));
 
-  const float normalized_current = normalize360(current_accumulated_deg_);
-  float delta = normalize360(target_deg_) - normalized_current;
+  const float normalized_current = AngleMath::normalize(current_accumulated_deg_);
+  float delta = AngleMath::normalize(target_deg_) - normalized_current;
   switch (direction_) {
-    case MoveDirection::Clockwise:
+    case MotionDirection::Clockwise:
       while (delta < 0.0f) delta += 360.0f;
       break;
-    case MoveDirection::CounterClockwise:
+    case MotionDirection::CounterClockwise:
       while (delta > 0.0f) delta -= 360.0f;
       break;
-    case MoveDirection::Shortest:
+    case MotionDirection::Shortest:
     default:
-      delta = shortestDelta(normalized_current, target_deg_);
+      delta = AngleMath::shortestDelta(normalized_current, target_deg_);
       break;
   }
   target_accumulated_deg_ = current_accumulated_deg_ + delta;
@@ -66,7 +68,7 @@ bool AdrcPositionController::retargetMove(float target_deg,
   return true;
 }
 
-bool AdrcPositionController::setPendingDirection(MoveDirection direction) {
+bool AdrcPositionController::setPendingDirection(MotionDirection direction) {
   if (!active_ || accumulated_initialized_) return false;
   direction_ = direction;
   return true;
@@ -90,21 +92,21 @@ void AdrcPositionController::cancel() {
 }
 
 void AdrcPositionController::primeAccumulatedAngle(float current_deg) {
-  const float normalized = normalize360(current_deg);
+  const float normalized = AngleMath::normalize(current_deg);
   current_accumulated_deg_ = normalized;
   last_current_deg_normalized_ = normalized;
   accumulated_initialized_ = true;
-  float delta = normalize360(target_deg_) - normalized;
+  float delta = AngleMath::normalize(target_deg_) - normalized;
   switch (direction_) {
-    case MoveDirection::Clockwise:
+    case MotionDirection::Clockwise:
       while (delta < 0.0f) delta += 360.0f;
       break;
-    case MoveDirection::CounterClockwise:
+    case MotionDirection::CounterClockwise:
       while (delta > 0.0f) delta -= 360.0f;
       break;
-    case MoveDirection::Shortest:
+    case MotionDirection::Shortest:
     default:
-      delta = shortestDelta(normalized, target_deg_);
+      delta = AngleMath::shortestDelta(normalized, target_deg_);
       break;
   }
   target_accumulated_deg_ = current_accumulated_deg_ + delta;
@@ -118,9 +120,9 @@ void AdrcPositionController::resumeAtAngle(float current_deg, uint32_t now_ms) {
   if (!accumulated_initialized_) {
     primeAccumulatedAngle(current_deg);
   } else {
-    const float normalized = normalize360(current_deg);
-    current_accumulated_deg_ +=
-      shortestDelta(last_current_deg_normalized_, normalized);
+    const float normalized = AngleMath::normalize(current_deg);
+    current_accumulated_deg_ =
+      AngleMath::unwrap(current_accumulated_deg_, normalized);
     last_current_deg_normalized_ = normalized;
   }
   kicking_ = false;
@@ -153,14 +155,14 @@ float AdrcPositionController::computeOutputPercent(float current_deg,
                                                    uint32_t now_ms) {
   if (!active_ || stalled_) return 0.0f;
 
-  const float normalized = normalize360(current_deg);
+  const float normalized = AngleMath::normalize(current_deg);
   velocity_estimator_.update(normalized, now_ms);
 
   if (!accumulated_initialized_) {
     primeAccumulatedAngle(normalized);
   } else {
-    current_accumulated_deg_ +=
-      shortestDelta(last_current_deg_normalized_, normalized);
+    current_accumulated_deg_ =
+      AngleMath::unwrap(current_accumulated_deg_, normalized);
     last_current_deg_normalized_ = normalized;
   }
 
@@ -289,17 +291,4 @@ float AdrcPositionController::computeOutputPercent(float current_deg,
   last_output_pwm_ = output_percent * 2.55f;
   last_pwm_output_percent_ = (int)roundf(output_percent);
   return output_percent;
-}
-
-float AdrcPositionController::normalize360(float deg) {
-  float value = fmodf(deg, 360.0f);
-  if (value < 0.0f) value += 360.0f;
-  return value;
-}
-
-float AdrcPositionController::shortestDelta(float from_deg, float to_deg) {
-  float delta = normalize360(to_deg) - normalize360(from_deg);
-  while (delta > 180.0f) delta -= 360.0f;
-  while (delta < -180.0f) delta += 360.0f;
-  return delta;
 }

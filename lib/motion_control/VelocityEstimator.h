@@ -33,6 +33,4 @@ class VelocityEstimator {
   bool has_prev_raw_ = false;
   float prev_raw_deg_ = 0.0f;
   float unwrapped_deg_ = 0.0f;
-
-  static float shortestAngleDelta(float from_deg, float to_deg);
 };

@@ -6,3 +6,4 @@ platformio.exe
 .vscode/launch.json
 .vscode/ipch
 include/wifi_credentials.h
+tests/__pycache__/

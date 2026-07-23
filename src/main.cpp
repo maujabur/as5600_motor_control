@@ -5,6 +5,7 @@
 #include <WiFi.h>
 #include <esp_wifi.h>
 
+#include <AngleMath.h>
 #include <AngleSensorManager.h>
 #include <AdrcPositionController.h>
 #include <MotionSequenceController.h>
@@ -729,7 +730,7 @@ void setupWebControl() {
 
     g_adrc_stall_fault = false;
     g_position_servo.startMove(
-      target_deg, rpm, AdrcPositionController::MoveDirection::Shortest);
+      target_deg, rpm, MotionDirection::Shortest);
     g_position_servo.primeAccumulatedAngle(current_deg);
     g_move_done_reported = false;
     g_move_start_ms = millis();
@@ -819,13 +820,6 @@ float applyDeadBandRemap(float abs_pct, float tstart, float tstop) {
   return tstart + (abs_pct - tstop) * (100.0f - tstart) / (100.0f - tstop);
 }
 
-float shortestAngleDeltaDeg(float from_deg, float to_deg) {
-  float delta = to_deg - from_deg;
-  while (delta > 180.0f) delta -= 360.0f;
-  while (delta < -180.0f) delta += 360.0f;
-  return delta;
-}
-
 bool setPwmFrequencyHz(uint32_t hz) {
   if (hz < PWM_MIN_FREQUENCY_HZ || hz > PWM_MAX_FREQUENCY_HZ) {
     return false;
@@ -862,10 +856,10 @@ bool readAngleSensorDeg(float* angle_deg) {
 
 void resolvePendingNumericDirection(float current_deg) {
   if (!g_pending_numeric_direction) return;
-  const AdrcPositionController::MoveDirection direction =
+  const MotionDirection direction =
     current_deg < g_position_servo.targetDeg()
-      ? AdrcPositionController::MoveDirection::Clockwise
-      : AdrcPositionController::MoveDirection::CounterClockwise;
+      ? MotionDirection::Clockwise
+      : MotionDirection::CounterClockwise;
   if (g_position_servo.setPendingDirection(direction)) {
     g_pending_numeric_direction = false;
   }
@@ -968,7 +962,8 @@ void updatePositionMoveControl() {
   if (g_move_prev_sample_valid) {
     const uint32_t dt_ms = now_ms - g_move_prev_ms;
     if (dt_ms > 0) {
-      const float delta_deg = shortestAngleDeltaDeg(g_move_prev_deg, current_deg);
+      const float delta_deg =
+        AngleMath::shortestDelta(g_move_prev_deg, current_deg);
       // Para rpm_medio, considera deslocamento quase integral; rejeita apenas glitches grosseiros.
       if (fabsf(delta_deg) <= 20.0f) {
         g_move_total_abs_delta_deg += fabsf(delta_deg);
@@ -1304,12 +1299,12 @@ void startAutomaticPositionMove(
   g_pending_numeric_direction =
     direction == RepetitiveMotionController::Direction::ByNumericComparison;
   const float limited_rpm = clampf(rpm, 0.1f, g_position_servo.settings().max_target_rpm);
-  AdrcPositionController::MoveDirection adrc_direction =
+  MotionDirection adrc_direction =
     direction == RepetitiveMotionController::Direction::Increasing
-      ? AdrcPositionController::MoveDirection::Clockwise
+      ? MotionDirection::Clockwise
       : direction == RepetitiveMotionController::Direction::Decreasing
-        ? AdrcPositionController::MoveDirection::CounterClockwise
-        : AdrcPositionController::MoveDirection::Shortest;
+        ? MotionDirection::CounterClockwise
+        : MotionDirection::Shortest;
   g_position_servo.startMove(target_deg, limited_rpm, adrc_direction);
 
   float current_deg = 0.0f;
@@ -1332,12 +1327,11 @@ void startAutomaticPositionMove(
 void startSequencePositionMove(float target_deg, float rpm,
                                MotionDirection direction) {
   g_pending_numeric_direction = false;
-  AdrcPositionController::MoveDirection servo_direction =
-    AdrcPositionController::MoveDirection::Shortest;
+  MotionDirection servo_direction = MotionDirection::Shortest;
   if (direction == MotionDirection::Clockwise) {
-    servo_direction = AdrcPositionController::MoveDirection::Clockwise;
+    servo_direction = MotionDirection::Clockwise;
   } else if (direction == MotionDirection::CounterClockwise) {
-    servo_direction = AdrcPositionController::MoveDirection::CounterClockwise;
+    servo_direction = MotionDirection::CounterClockwise;
   }
   const float limited_rpm = clampf(
     rpm, 0.1f, g_position_servo.settings().max_target_rpm);
@@ -1361,12 +1355,11 @@ void startSequencePositionMove(float target_deg, float rpm,
 bool continueSequencePositionMove(float target_deg, float rpm,
                                   MotionDirection direction) {
   g_pending_numeric_direction = false;
-  AdrcPositionController::MoveDirection servo_direction =
-    AdrcPositionController::MoveDirection::Shortest;
+  MotionDirection servo_direction = MotionDirection::Shortest;
   if (direction == MotionDirection::Clockwise) {
-    servo_direction = AdrcPositionController::MoveDirection::Clockwise;
+    servo_direction = MotionDirection::Clockwise;
   } else if (direction == MotionDirection::CounterClockwise) {
-    servo_direction = AdrcPositionController::MoveDirection::CounterClockwise;
+    servo_direction = MotionDirection::CounterClockwise;
   }
   const float limited_rpm = clampf(
     rpm, 0.1f, g_position_servo.settings().max_target_rpm);
@@ -1687,18 +1680,18 @@ void parseAndHandleCommand(char* line) {
     return inline_value[0] ? inline_value : strtok_r(nullptr, " \t", &ctx);
   };
 
-  auto parseMoveDirection = [](const char* token, AdrcPositionController::MoveDirection* direction) -> bool {
+  auto parseMoveDirection = [](const char* token, MotionDirection* direction) -> bool {
     if (!token || !direction) return false;
     if (!strcmp(token, "short") || !strcmp(token, "shortest") || !strcmp(token, "nearest")) {
-      *direction = AdrcPositionController::MoveDirection::Shortest;
+      *direction = MotionDirection::Shortest;
       return true;
     }
     if (!strcmp(token, "cw") || !strcmp(token, "horario") || !strcmp(token, "cw+")) {
-      *direction = AdrcPositionController::MoveDirection::Clockwise;
+      *direction = MotionDirection::Clockwise;
       return true;
     }
     if (!strcmp(token, "ccw") || !strcmp(token, "anti") || !strcmp(token, "antihorario") || !strcmp(token, "ccw-")) {
-      *direction = AdrcPositionController::MoveDirection::CounterClockwise;
+      *direction = MotionDirection::CounterClockwise;
       return true;
     }
     return false;
@@ -1876,10 +1869,10 @@ void parseAndHandleCommand(char* line) {
     const float target_deg = (float)atof(deg_token);
     const AdrcPositionSettings& s = g_position_servo.settings();
     float vmax_rpm = g_default_move_max_rpm;
-    AdrcPositionController::MoveDirection direction = AdrcPositionController::MoveDirection::Shortest;
+    MotionDirection direction = MotionDirection::Shortest;
 
-    if (!strcmp(cmd, "cw")) direction = AdrcPositionController::MoveDirection::Clockwise;
-    if (!strcmp(cmd, "ccw")) direction = AdrcPositionController::MoveDirection::CounterClockwise;
+    if (!strcmp(cmd, "cw")) direction = MotionDirection::Clockwise;
+    if (!strcmp(cmd, "ccw")) direction = MotionDirection::CounterClockwise;
 
     auto consumeToken = [&](char* token) {
       if (!token) return;
@@ -1903,8 +1896,8 @@ void parseAndHandleCommand(char* line) {
     g_move_done_reported = false;
     g_move_start_ms = millis();
     const char* direction_text =
-      direction == AdrcPositionController::MoveDirection::Clockwise ? "cw" :
-      direction == AdrcPositionController::MoveDirection::CounterClockwise ? "ccw" : "short";
+      direction == MotionDirection::Clockwise ? "cw" :
+      direction == MotionDirection::CounterClockwise ? "ccw" : "short";
     Serial.printf("OK: move alvo=%.2f deg  vmax=%.2f rpm  dir=%s\n", target_deg, vmax_rpm, direction_text);
     return;
   }
@@ -1943,9 +1936,9 @@ void parseAndHandleCommand(char* line) {
 
     // Delta positivo = CW (Clockwise), negativo = CCW (CounterClockwise)
     const float target_accumulated_deg = current_deg + delta_deg;
-    const AdrcPositionController::MoveDirection direction =
-      delta_deg >= 0.0f ? AdrcPositionController::MoveDirection::Clockwise
-                        : AdrcPositionController::MoveDirection::CounterClockwise;
+    const MotionDirection direction =
+      delta_deg >= 0.0f ? MotionDirection::Clockwise
+                        : MotionDirection::CounterClockwise;
 
     g_position_servo.startMove(target_accumulated_deg, vmax_rpm, direction);
     g_position_servo.primeAccumulatedAngle(current_deg);
@@ -1992,9 +1985,9 @@ void parseAndHandleCommand(char* line) {
 
     // Delta positivo = CCW (CounterClockwise), negativo = CW (Clockwise)
     const float target_accumulated_deg = current_deg - delta_deg;
-    const AdrcPositionController::MoveDirection direction =
-      delta_deg >= 0.0f ? AdrcPositionController::MoveDirection::CounterClockwise
-                        : AdrcPositionController::MoveDirection::Clockwise;
+    const MotionDirection direction =
+      delta_deg >= 0.0f ? MotionDirection::CounterClockwise
+                        : MotionDirection::Clockwise;
 
     g_position_servo.startMove(target_accumulated_deg, vmax_rpm, direction);
     g_position_servo.primeAccumulatedAngle(current_deg);

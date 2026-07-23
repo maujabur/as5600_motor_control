@@ -16,8 +16,8 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
         body = body.split("void AdrcPositionController::", 1)[0]
         for token in ("if (!active_)", "if (!accumulated_initialized_)",
                       "primeAccumulatedAngle(current_deg)",
-                      "normalize360(current_deg)",
-                      "shortestDelta(last_current_deg_normalized_, normalized)",
+                      "AngleMath::normalize(current_deg)",
+                      "AngleMath::unwrap(current_accumulated_deg_, normalized)",
                       "profiled_target_deg_ = current_accumulated_deg_",
                       "resetObserver(current_accumulated_deg_, now_ms)",
                       "velocity_estimator_.reset()", "stall_started_ms_ = 0",
@@ -144,7 +144,7 @@ class SensorRecoveryIntegrationContractTest(unittest.TestCase):
             cancel = cancel.split("\nvoid ", 1)[0]
             self.assertIn("g_pending_numeric_direction = false", cancel)
 
-        self.assertIn("setPendingDirection(MoveDirection direction)", ADRC_H)
+        self.assertIn("setPendingDirection(MotionDirection direction)", ADRC_H)
         setter = ADRC_CPP.split(
             "bool AdrcPositionController::setPendingDirection", 1)[1]
         setter = setter.split("void AdrcPositionController::", 1)[0]

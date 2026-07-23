@@ -1,23 +1,6 @@
 #include "MotionSequenceController.h"
 
-#include <math.h>
-
-namespace {
-
-float normalize360(float deg) {
-  float value = fmodf(deg, 360.0f);
-  if (value < 0.0f) value += 360.0f;
-  return value;
-}
-
-float shortestDelta(float from_deg, float to_deg) {
-  float delta = normalize360(to_deg) - normalize360(from_deg);
-  while (delta > 180.0f) delta -= 360.0f;
-  while (delta < -180.0f) delta += 360.0f;
-  return delta;
-}
-
-}  // namespace
+#include <AngleMath.h>
 
 MotionSequenceController::MotionSequenceController(const Commands& commands)
     : commands_(commands) {}
@@ -45,7 +28,8 @@ int8_t MotionSequenceController::moveDirectionSignFromTo(uint8_t from_step_index
       return -1;
     case MotionDirection::Shortest:
     default: {
-      const float delta = shortestDelta(from_target_deg, to_step.target_deg);
+      const float delta =
+        AngleMath::shortestDelta(from_target_deg, to_step.target_deg);
       if (delta > 0.0f) return 1;
       if (delta < 0.0f) return -1;
       return 0;

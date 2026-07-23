@@ -1,5 +1,7 @@
 #include "VelocityEstimator.h"
 
+#include <AngleMath.h>
+
 #include <math.h>
 
 float VelocityEstimator::update(float current_pos_deg, uint32_t now_ms) {
@@ -8,8 +10,7 @@ float VelocityEstimator::update(float current_pos_deg, uint32_t now_ms) {
     prev_raw_deg_ = current_pos_deg;
     unwrapped_deg_ = current_pos_deg;
   } else {
-    const float delta = shortestAngleDelta(prev_raw_deg_, current_pos_deg);
-    unwrapped_deg_ += delta;
+    unwrapped_deg_ = AngleMath::unwrap(unwrapped_deg_, current_pos_deg);
     prev_raw_deg_ = current_pos_deg;
   }
 
@@ -105,11 +106,4 @@ void VelocityEstimator::reset() {
   last_added_sample_ms_ = 0;
   prev_raw_deg_ = 0.0f;
   unwrapped_deg_ = 0.0f;
-}
-
-float VelocityEstimator::shortestAngleDelta(float from_deg, float to_deg) {
-  float delta = to_deg - from_deg;
-  while (delta > 180.0f) delta -= 360.0f;
-  while (delta < -180.0f) delta += 360.0f;
-  return delta;
 }

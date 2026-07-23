@@ -12,7 +12,7 @@ class ManualMoveContractTest(unittest.TestCase):
         self.assertIn('g_web_server.on("/api/manual-move", HTTP_POST', MAIN)
         self.assertIn('parseWebNumber("target", &target_deg)', MAIN)
         self.assertIn('parseWebNumber("rpm", &rpm)', MAIN)
-        self.assertIn('AdrcPositionController::MoveDirection::Shortest', MAIN)
+        self.assertIn('MotionDirection::Shortest', MAIN)
 
     def test_api_rejects_move_when_controller_is_busy(self):
         marker = 'g_web_server.on("/api/manual-move", HTTP_POST'
